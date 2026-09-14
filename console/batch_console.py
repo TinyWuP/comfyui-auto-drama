@@ -7,7 +7,9 @@
 启动：
     python3 batch_console.py [端口]      # 默认 8890
 浏览器打开：
-    http://127.0.0.1:8890
+    http://127.0.0.1:8890（本机）或 http://<局域网IP>:8890
+监听地址默认 0.0.0.0（允许局域网访问），可在 config.json 的 console.host
+或环境变量 BATCH_CONSOLE_HOST 中改回 127.0.0.1 仅本机访问。
 """
 
 import base64
@@ -66,7 +68,7 @@ _CONFIG_DEFAULTS = {
             "clip": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
         }
     },
-    "console": {"port": 8890, "max_ref_images": 8},
+    "console": {"port": 8890, "host": "0.0.0.0", "max_ref_images": 8},
 }
 
 
@@ -4742,9 +4744,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8890
-    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"ComfyUI 批量控制台已启动：http://127.0.0.1:{port}")
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else int(_CONFIG["console"].get("port", 8890))
+    # 监听地址：默认 0.0.0.0（允许局域网访问），可用 config.json 的 console.host
+    # 或环境变量 BATCH_CONSOLE_HOST 覆盖（如改回 127.0.0.1 仅本机访问）
+    host = os.environ.get("BATCH_CONSOLE_HOST") or _CONFIG["console"].get("host", "0.0.0.0")
+    srv = ThreadingHTTPServer((host, port), Handler)
+    display_host = "127.0.0.1" if host == "0.0.0.0" else host
+    print(f"ComfyUI 批量控制台已启动：http://{display_host}:{port}（监听 {host}:{port}）")
     print(f"工作流目录：{DEFAULT_WORKFLOW_DIR}")
     print(f"默认服务器：{DEFAULT_SERVER}")
     try:
