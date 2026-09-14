@@ -1177,19 +1177,49 @@ def enhance_prompt(prompt, task=None):
     return p.strip()
 
 
+_EXTRACT_ERR_LOG_AT = {}  # 抽帧失败诊断限流：同文件 60 秒内只打印一次
+
+
 def extract_last_frame(video_path):
-    """ffmpeg 抽视频最后一帧 → 返回临时 PNG 路径（ASCII 目录）。"""
+    """ffmpeg 抽视频最后一帧 → 返回临时 PNG 路径（ASCII 目录）。
+
+    两档策略：先 -sseof 尾部反向 seek（快）；失败再全片解码取末帧（慢但稳，
+    兼容 moov 在尾部/短流/时间戳异常导致 seek 失败的 mp4）。
+    失败时打印 ffmpeg stderr 尾部，便于定位（此前静默 None 只见"抽帧失败"）。
+    """
     tmpdir = tempfile.mkdtemp(prefix="chain_")
     tmp_video = os.path.join(tmpdir, "in.mp4")
     out_png = os.path.join(tmpdir, "last.png")
-    shutil.copy(video_path, tmp_video)
-    r = subprocess.run(
-        ["ffmpeg", "-y", "-sseof", "-0.1", "-i", tmp_video, "-frames:v", "1", out_png],
-        capture_output=True,
-    )
-    if r.returncode != 0 or not os.path.exists(out_png):
+    try:
+        shutil.copy(video_path, tmp_video)
+    except Exception as e:
+        print(f"[chain] 抽帧失败：复制视频异常 {video_path}: {e}")
         return None
-    return out_png
+    cmds = [
+        ["ffmpeg", "-y", "-sseof", "-0.1", "-i", tmp_video, "-update", "1",
+         "-frames:v", "1", out_png],
+        ["ffmpeg", "-y", "-i", tmp_video, "-vf", "select=gte(t\\,dur-0.2)",
+         "-an", "-frames:v", "1", out_png],
+    ]
+    last_err = ""
+    for cmd in cmds:
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=120)
+        except FileNotFoundError:
+            print("[chain] 抽帧失败：服务器上没有 ffmpeg，请安装后重启控制台")
+            return None
+        except Exception as e:
+            last_err = str(e)
+            continue
+        if r.returncode == 0 and os.path.exists(out_png) and os.path.getsize(out_png) > 0:
+            return out_png
+        last_err = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()[-1] if r.stderr else f"rc={r.returncode}"
+    # 同一文件 60 秒内只报一次诊断，避免轮询刷屏
+    now = time.time()
+    if now - _EXTRACT_ERR_LOG_AT.get(video_path, 0) > 60:
+        _EXTRACT_ERR_LOG_AT[video_path] = now
+        print(f"[chain] 抽帧失败诊断（{os.path.basename(video_path)}）：{last_err[:300]}")
+    return None
 
 
 def submit_tasks(server, tasks, auto_download=True, chain_mode=False, role_images=None, scene_image=None):
