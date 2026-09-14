@@ -2882,6 +2882,15 @@ def _img_openai(ep, prompt, filename, size="768x1024", timeout=300):
         "size": size,
         "response_format": "b64_json",
     }
+    # 提速：百炼 qwen-image 的 enable_thinking / prompt_extend 默认 true 且显著增加耗时，
+    # config.image_gen.speed 可关闭；仅对支持的端点下发（非百炼端点带该字段可能 400，故按需）
+    sp = _CONFIG.get("image_gen", {}).get("speed") or {}
+    _epurl = str(ep.get("url", ""))
+    if isinstance(sp, dict) and ("maas.aliyuncs.com" in _epurl or "bailian" in _epurl or "dashscope" in _epurl):
+        payload["prompt_extend"] = bool(sp.get("prompt_extend", True))
+        payload["enable_thinking"] = bool(sp.get("enable_thinking", True))
+        if sp.get("negative_prompt"):
+            payload["negative_prompt"] = str(sp["negative_prompt"])
     req = urllib.request.Request(
         _v1(ep["url"]) + "/images/generations",
         data=json.dumps(payload).encode("utf-8"),
@@ -3102,7 +3111,10 @@ def vision_ask(image_path, prompt, timeout=120):
 
 
 def verify_asset(image_path, kind, expected=None, timeout=120):
-    """质检图片：角色（性别/服装）、场景（无人/无现代物品）、分镜（形象/穿帮）。"""
+    """质检图片：角色（性别/服装）、场景（无人/无现代物品）、分镜（形象/穿帮）。
+    config.image_gen.verify=false 可关闭质检（每张省一次视觉大模型调用的耗时）。"""
+    if not (_CONFIG.get("image_gen", {}).get("verify", True)):
+        return {"ok": True, "issues": []}
     expected = expected or {}
     if kind == "role":
         gender = expected.get("gender") or "未知"

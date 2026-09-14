@@ -65,6 +65,9 @@
 | `cloud.base_url` | 云端 OpenAI 兼容图片接口 | `https://api.openai.com/v1` |
 | `cloud.api_key` | 云端 Key | `sk-xxx` |
 | `cloud.model` | 图片模型名 | `gpt-image-1` |
+| `speed.enable_thinking` | 仅百炼端点下发：`false` 关闭思考模式，**明显提速**（默认 false） | `false` |
+| `speed.prompt_extend` | 仅百炼端点下发：`false` 关闭提示词改写，省数秒（默认 false） | `false` |
+| `verify` | 生图后是否调视觉模型质检（每张多一次大模型往返）；`false` 关闭省约一半耗时，但失去穿帮自动拦截 | `true` |
 
 **说明**：
 - 本地部署见 `README.md` 的"Boogu-Image 本地部署"（Apple Silicon / MLX，一键脚本 `scripts/deploy_boogu.sh`）

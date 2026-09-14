@@ -350,6 +350,17 @@
       <label style="font-size:12px;color:var(--muted);margin-top:6px;display:inline-block">
         <input type="checkbox" id="genFourViews" checked> 角色四视图（正/脸/侧/背），取消则只生成正面锚点
       </label>
+      <label style="font-size:12px;color:var(--muted);margin-top:6px;display:inline-block">
+        并发数
+        <select id="genConcurrency" style="font-size:12px">
+          <option value="1">1（稳，抗限流）</option>
+          <option value="2">2</option>
+          <option value="3" selected>3（推荐，提速~3倍）</option>
+          <option value="4">4</option>
+          <option value="6">6（易触发厂商限流）</option>
+        </select>
+        <span style="opacity:.7">并发越高越快，但过高会触发百炼 QPS 限流（后端会自动退避重试）</span>
+      </label>
       <div id="assetProgress" style="display:none;margin-top:8px">
         <div style="height:8px;background:#e2e8f0;border-radius:99px;overflow:hidden">
           <div id="assetBar" style="height:100%;width:0%;background:var(--blue);transition:width .4s"></div>
@@ -2657,34 +2668,45 @@ async function genAllAssets() {
   });
   const total = todo.length;
   if (!total) { toast('没有可生成的资产', true); return; }
-  toastLoading(`⚡ 一键生成中（共 ${total} 张，每张约 30-60 秒，请保持页面打开）…`);
+  const conc = Math.max(1, parseInt(($('genConcurrency') && $('genConcurrency').value) || '3', 10));
+  const etaMin = Math.round(total * 45 / conc / 60);
+  toastLoading(`⚡ 一键生成中（共 ${total} 张，并发 ${conc}，预计约 ${etaMin} 分钟，请保持页面打开）…`);
   $('assetProgress').style.display = '';
   $('assetBar').style.width = '0%';
   let doneN = 0;
+  const startedAt = Date.now();
   const tick = (label) => {
     doneN++;
     $('assetBar').style.width = `${Math.round(doneN / total * 100)}%`;
-    $('assetProgressText').textContent = `已处理 ${doneN}/${total} 张 · ${label}`;
+    const elapsed = (Date.now() - startedAt) / 1000;
+    const remain = doneN < total ? Math.round(elapsed / doneN * (total - doneN) / 60) : 0;
+    $('assetProgressText').textContent = `已处理 ${doneN}/${total} 张 · 并发${conc}${remain ? ` · 约剩 ${remain} 分` : ''} · 最近：${label}`;
   };
-  // 单张失败不再中断整批：记录错误继续跑完，结束后汇总（缺失项再点一次即续跑）
+  // 并发工作池：单张失败不中断整批，失败项记录后汇总（缺失再点一次即续跑）
   const failed = [];
-  for (const t of todo) {
-    try {
-      await t.fn();
-    } catch (e) {
-      failed.push(`${t.label}：${e.message || e}`);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < todo.length) {
+      const t = todo[cursor++];
+      try {
+        await t.fn();
+      } catch (e) {
+        failed.push(`${t.label}：${e.message || e}`);
+      }
+      tick(t.label);
     }
-    tick(t.label);
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(conc, todo.length) }, worker));
   renderAssets();
   autoSaveProject(true);
   $('assetProgress').style.display = 'none';
+  const mins = Math.round((Date.now() - startedAt) / 60000);
   if (failed.length) {
     const more = failed.length > 3 ? ` …等共 ${failed.length} 项` : '';
-    toast(`⚠️ 完成 ${total - failed.length}/${total} 张，失败 ${failed.length} 张：${failed.slice(0, 3).join('；')}${more}（可再点一键生成续跑缺失项）`, true);
+    toast(`⚠️ 完成 ${total - failed.length}/${total} 张（用时${mins}分），失败 ${failed.length} 张：${failed.slice(0, 3).join('；')}${more}（可再点一键生成续跑缺失项）`, true);
     console.warn('一键生成失败清单:', failed);
   } else {
-    toast(`✅ 一键生成完成，共 ${total} 张`);
+    toast(`✅ 一键生成完成，共 ${total} 张，用时约 ${mins} 分钟`);
   }
 }
 

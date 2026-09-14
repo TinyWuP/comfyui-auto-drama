@@ -5,6 +5,31 @@
 
 ---
 
+## 2026-09-14 · v0.13.21 — 一键生成提速：并发池 + 百炼快速参数 + 质检开关
+
+### 本次更新内容
+
+- **前端并发工作池**：`genAllAssets` 由串行改为可配置并发（新增「并发数」下拉，默认 3）。
+  44 张 × 45s ÷ 3 ≈ 15 分钟（原约 33 分钟）。并发数 1 为原串行行为；过高会触发厂商
+  QPS 限流（后端已有退避重试兜底）。进度条增加"约剩 N 分"预计剩余时间
+- **百炼快速参数** `image_gen.speed`（仅对 maas/bailian/dashscope 端点下发，避免污染 OpenAI 等）：
+  `enable_thinking=false` 关闭思考模式（官方文档明确显著增耗时，提速主力）、
+  `prompt_extend=false` 关闭提示词改写；`negative_prompt` 可选
+- **质检开关** `image_gen.verify`（默认 true）：设 false 跳过每图的视觉质检
+  （`verify_asset` 每张多一次大模型往返，是 45s 的另一半来源），省约一半耗时但失去穿帮拦截
+- `config.example.json`、`CONFIG.md` 同步补充 speed / verify 字段说明
+
+### 影响与注意事项
+
+- 前后端改动均需重启控制台 + 强刷页面生效
+- 提速组合建议：并发 3 + `enable_thinking=false`（约 3~4 倍提速，质量损失小）；
+  极致提速再叠加 `verify=false`（但分镜/角色穿帮不再自动重试，需人工把关）
+- 关闭 enable_thinking 出图细节略降，画面越复杂影响越大；可先小规模试一张对比
+- 并发调用共享 `autoSaveProject` 防抖快照与逐张立即保存，写盘走 `_save_asset` 幂等 makedirs，安全
+- 验证方式：模拟端点验证 speed 仅百炼下发、非百炼不污染；verify=false 直接放行；py 编译通过
+
+---
+
 ## 2026-09-14 · v0.13.20 — 一键生成不再单点中断 + 云端限流退避重试
 
 ### 本次更新内容
