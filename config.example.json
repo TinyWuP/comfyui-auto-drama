@@ -1,7 +1,14 @@
 {
   "comfyui": {
     "server": "http://127.0.0.1:8188",
-    "workflow_dir": "workflows"
+    "workflow_dir": "workflows",
+    "auth": {
+      "enabled": false,
+      "username": "",
+      "password": "",
+      "login_path": "/comfyui-auth/login",
+      "token_field": "token"
+    }
   },
   "storage": {
     "output_dir": "comfyui_backup/outputs",

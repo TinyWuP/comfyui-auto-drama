@@ -14,6 +14,16 @@
 |---|---|---|
 | `server` | ComfyUI 服务器地址（局域网远程机或本机） | `http://192.168.1.23:8188` |
 | `workflow_dir` | 工作流脚本目录（`build_api_graphs.py`、`*_api_template.json` 所在处） | `workflows` |
+| `auth.enabled` | 认证开关：远程 ComfyUI 装了 comfyui-auth 等认证插件时设为 `true` | `false` |
+| `auth.username` | 登录用户名（开启认证时必填） | `admin` |
+| `auth.password` | 登录密码（**不要提交进 git**） | `xxxxxx` |
+| `auth.login_path` | 登录接口路径，默认适配 `ivellioscolin/comfyui-auth`（表单登录 + 会话 cookie）；JWT 类插件（如 ComfyUI-Account-Manager）填其登录路径如 `/login` | `/comfyui-auth/login` |
+| `auth.token_field` | JWT 类插件登录响应中 token 的字段名（cookie 会话类留默认即可） | `token` |
+
+**认证说明**：`auth.enabled=true` 时，控制台首次调用 ComfyUI 接口会自动 POST 登录接口换取
+会话凭证（cookie 或 Bearer token，按插件实现自适应），之后 `/prompt`、`/queue`、`/history`、
+`/view`、`/upload/image`、`/object_info` 等全部自动携带；会话过期收到 401 时自动重登重试一次。
+凭据错误/路径不匹配会在日志打 `[auth]` 错误，界面服务器状态提示认证失败。
 
 **说明**：远程 ComfyUI 需要安装 MiniMax H3 节点与模型（ref2va 工作流、turbo LoRA、SageAttention、无审查 CLIP），详见 `README.md` 的"远程依赖"章节。
 

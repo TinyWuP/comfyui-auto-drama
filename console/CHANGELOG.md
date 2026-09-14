@@ -5,6 +5,32 @@
 
 ---
 
+## 2026-09-14 · v0.13.16 — 兼容 comfyui-auth 认证插件（ComfyUI 登录鉴权）
+
+### 本次更新内容
+
+- `config.json → comfyui.auth` 新增认证开关：`enabled`（默认 false）、`username`、`password`，
+  以及可选 `login_path`（默认 `/comfyui-auth/login`）、`token_field`（默认 `token`）
+- 开启后所有 ComfyUI 请求（`/prompt`、`/queue`、`/history`、`/view` 下载、`/upload/image`、
+  `/object_info`、`/system_stats`）自动先登录换取会话凭证再携带，实现：
+  - 每服务器独立会话（cookiejar 保持），登录 POST 表单失败自动回退 JSON 登录体
+  - 自适应两类插件：ivellioscolin/comfyui-auth（表单 + Set-Cookie 会话）、
+    JWT 类（响应 token → `Authorization: Bearer`）
+  - 会话过期自动重登重试一次：覆盖 POST 401 与 GET 被 302 到登录页两种表现；
+    重试时剔除旧 Cookie/Authorization 头，避免脏凭证阻塞新会话
+  - 凭据错误/路径不匹配抛明确中文错误（`[auth]` 日志），不静默
+- `api_get/api_post/_opener/upload_image` 等统一走 `_authed_open`；未开启认证时行为与旧版一致
+- `config.example.json`、`CONFIG.md` 同步补充 comfyui.auth 字段说明
+
+### 影响与注意事项
+
+- 需重启控制台服务生效；chain_daemon 复用同模块，重启守护进程即同步生效
+- 密码写在 config.json（该文件含 API key，本就不应提交 git），注意文件权限
+- 验证方式：本地模拟 comfyui-auth（表单登录+cookie+401/302）与 JWT 插件双场景，
+  自动登录、过期重登、错误凭据报错、关闭开关回归四类用例全部通过
+
+---
+
 ## 2026-09-14 · v0.13.15 — 控制台默认监听 0.0.0.0，支持局域网访问
 
 ### 本次更新内容

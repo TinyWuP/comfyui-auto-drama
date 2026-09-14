@@ -15,6 +15,7 @@
 import base64
 import csv
 import hashlib
+import http.cookiejar
 import io
 import json
 import math
@@ -28,6 +29,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -47,7 +49,17 @@ RULES_DIR = os.path.join(BASE_DIR, "rules")
 # ---------- 配置加载（config.json，路径相对项目根，禁止绝对路径） ----------
 
 _CONFIG_DEFAULTS = {
-    "comfyui": {"server": "http://127.0.0.1:8188", "workflow_dir": "workflows"},
+    "comfyui": {
+        "server": "http://127.0.0.1:8188",
+        "workflow_dir": "workflows",
+        "auth": {
+            "enabled": False,
+            "username": "",
+            "password": "",
+            "login_path": "/comfyui-auth/login",
+            "token_field": "token",
+        },
+    },
     "storage": {"output_dir": "comfyui_backup/outputs", "asset_dirs": ["素材", "出镜素材"]},
     "llm": {
         "provider": "local",
@@ -153,13 +165,154 @@ def estimate_timeout(task):
 
 # ---------- HTTP 工具 ----------
 
-def _opener():
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+# ---------- ComfyUI 认证（comfyui-auth 插件兼容） ----------
+# config.json → comfyui.auth.enabled 开启后，所有对 ComfyUI 的请求先登录换取
+# 会话凭证（cookie 会话或 Bearer token，取决于插件实现），后续请求自动携带；
+# 收到 401 时自动重新登录并重试一次。
+
+AUTH_CFG = _CONFIG["comfyui"].get("auth") or {}
+_AUTH_LOCK = threading.Lock()
+_AUTH_SESSIONS = {}  # server -> {"opener","jar","token","fail_msg"}
+
+
+def _auth_enabled():
+    return bool(AUTH_CFG.get("enabled"))
+
+
+_AUTH_COOKIE_NAMES = ("comfyui_auth", "session", "token", "jwt")
+
+
+def _sess_logged_in(sess):
+    """会话是否已持有有效凭证：Bearer token 或疑似会话 cookie。"""
+    if sess.get("token"):
+        return True
+    return any(c.name.lower().startswith(_AUTH_COOKIE_NAMES) or "auth" in c.name.lower()
+               for c in sess["jar"])
+
+
+def _auth_session(server):
+    """每服务器一个带 cookiejar 的 opener（保持会话）；开启认证时先登录。"""
+    with _AUTH_LOCK:
+        sess = _AUTH_SESSIONS.get(server)
+        if sess is None:
+            jar = http.cookiejar.CookieJar()
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}),
+                urllib.request.HTTPCookieProcessor(jar),
+            )
+            sess = {"opener": opener, "jar": jar, "token": None, "fail_msg": None}
+            _AUTH_SESSIONS[server] = sess
+        if _auth_enabled() and not _sess_logged_in(sess):
+            _auth_login(server, sess)
+        return sess
+
+
+def _auth_login(server, sess):
+    """POST 登录接口。兼容两类插件：
+    - ivellioscolin/comfyui-auth：表单登录，Set-Cookie 会话（本函数经 cookiejar 自动保存）
+    - ComfyUI-Account-Manager 等 JWT 类：JSON 响应带 token，存为 Bearer
+    失败时记录原因（同一凭据错误避免刷屏），由请求层抛错。"""
+    user = str(AUTH_CFG.get("username") or "")
+    pwd = str(AUTH_CFG.get("password") or "")
+    login_path = str(AUTH_CFG.get("login_path") or "/comfyui-auth/login")
+    token_field = str(AUTH_CFG.get("token_field") or "token")
+    if not user:
+        sess["fail_msg"] = "comfyui.auth 已开启但未配置 username/password"
+        raise RuntimeError(sess["fail_msg"])
+    body = urllib.parse.urlencode({"username": user, "password": pwd}).encode("utf-8")
+    req = urllib.request.Request(
+        server + login_path, data=body, method="POST",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "batch-console",
+            "Accept": "application/json, text/html",
+        },
+    )
+    try:
+        with sess["opener"].open(req, timeout=15) as r:
+            raw = r.read(65536)
+    except Exception:
+        # 表单登录被拒（4xx/5xx/连接异常）→ 回退 JSON 登录体再试一次（JWT 类插件）
+        jbody = json.dumps({"username": user, "password": pwd}).encode("utf-8")
+        req2 = urllib.request.Request(
+            server + login_path, data=jbody, method="POST",
+            headers={"Content-Type": "application/json", "User-Agent": "batch-console"},
+        )
+        try:
+            with sess["opener"].open(req2, timeout=15) as r2:
+                raw = r2.read(65536)
+        except Exception as e2:
+            sess["fail_msg"] = f"ComfyUI 认证登录失败：{e2}（检查 comfyui.auth 用户名/密码/login_path）"
+            raise RuntimeError(sess["fail_msg"])
+    sess["token"] = None
+    try:
+        d = json.loads(raw.decode("utf-8"))
+        tok = d.get(token_field) or d.get("access_token") or (d.get("data") or {}).get(token_field)
+        if tok:
+            sess["token"] = str(tok)
+    except Exception:
+        pass
+    if not sess["token"] and not _sess_logged_in(sess):
+        sess["fail_msg"] = "ComfyUI 认证登录未获得会话（凭据错误？login_path 不匹配？响应无 token？）"
+        raise RuntimeError(sess["fail_msg"])
+    sess["fail_msg"] = None
+    print(f"[auth] ComfyUI 认证登录成功：{server}（{'bearer' if sess['token'] else 'cookie'} 会话）", flush=True)
+
+
+def _auth_headers(server):
+    if not _auth_enabled():
+        return {}
+    sess = _auth_session(server)
+    return {"Authorization": f"Bearer {sess['token']}"} if sess.get("token") else {}
+
+
+def _opener(server=None):
+    sess = _auth_session(server) if (server and _auth_enabled()) else None
+    if sess:
+        return sess["opener"]
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener
+
+
+def _authed_open(server, req, timeout, data=None):
+    """打开请求；开启认证时会话过期自动重登并重试一次。
+    兼容两种未认证表现：非 GET 返回 401；GET 被 302 重定向到登录页。"""
+    opener = _opener(server)
+
+    def _redirected_to_login(resp):
+        try:
+            login_path = str(AUTH_CFG.get("login_path") or "/comfyui-auth/login")
+            return login_path in (resp.geturl() or "")
+        except Exception:
+            return False
+
+    try:
+        resp = opener.open(req, timeout=timeout)
+        if _auth_enabled() and server and resp.code == 200 and _redirected_to_login(resp):
+            resp.close()
+            raise urllib.error.HTTPError(req.full_url, 401, "redirected to login", None, None)
+        return resp
+    except urllib.error.HTTPError as e:
+        if _auth_enabled() and server and e.code == 401:
+            with _AUTH_LOCK:  # 会话过期：清掉旧凭证强制重新登录，重试一次
+                sess = _AUTH_SESSIONS.get(server)
+                if sess is not None:
+                    sess["token"] = None
+                    sess["jar"].clear()
+            _auth_session(server)
+            # 注意：cookiejar 会把旧 Cookie 写回原 req 的 unredirected headers，
+            # 重建时必须剔除 Cookie/Authorization，否则新会话凭证无法注入
+            headers = {k: v for k, v in req.header_items()
+                       if k.lower() not in ("cookie", "authorization")}
+            headers.update(_auth_headers(server))
+            req2 = urllib.request.Request(req.full_url, data=data, method=req.get_method(), headers=headers)
+            return opener.open(req2, timeout=timeout)
+        raise
 
 
 def api_get(server, path, timeout=15):
-    req = urllib.request.Request(server + path, headers={"User-Agent": "batch-console"})
-    with _opener().open(req, timeout=timeout) as r:
+    req = urllib.request.Request(server + path, headers={"User-Agent": "batch-console", **_auth_headers(server)})
+    with _authed_open(server, req, timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -167,9 +320,9 @@ def api_post(server, path, payload, timeout=30):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         server + path, data=data, method="POST",
-        headers={"Content-Type": "application/json", "User-Agent": "batch-console"},
+        headers={"Content-Type": "application/json", "User-Agent": "batch-console", **_auth_headers(server)},
     )
-    with _opener().open(req, timeout=timeout) as r:
+    with _authed_open(server, req, timeout, data=data) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -200,9 +353,9 @@ def upload_image(server, local_path, filename):
     parts.append(f"--{boundary}--\r\n".encode("utf-8"))
     req = urllib.request.Request(
         server + "/api/upload/image", b"".join(parts), method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "batch-console"},
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "batch-console", **_auth_headers(server)},
     )
-    with _opener().open(req, timeout=120) as r:
+    with _authed_open(server, req, 120, data=b"".join(parts)) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -1213,15 +1366,15 @@ def _server_models(server):
         return _MODEL_CACHE["unets"], _MODEL_CACHE["clips"]
     unets, clips = [], []
     try:
-        req = urllib.request.Request(server + "/object_info/UNETLoader", headers={"User-Agent": "batch-console"})
-        with _opener().open(req, timeout=15) as r:
+        req = urllib.request.Request(server + "/object_info/UNETLoader", headers={"User-Agent": "batch-console", **_auth_headers(server)})
+        with _authed_open(server, req, 15) as r:
             d = json.loads(r.read().decode("utf-8"))
         unets = (d.get("UNETLoader", {}).get("input", {}).get("required", {}).get("unet_name") or [[]])[0]
     except Exception:
         pass
     try:
-        req = urllib.request.Request(server + "/object_info/CLIPLoader", headers={"User-Agent": "batch-console"})
-        with _opener().open(req, timeout=15) as r:
+        req = urllib.request.Request(server + "/object_info/CLIPLoader", headers={"User-Agent": "batch-console", **_auth_headers(server)})
+        with _authed_open(server, req, 15) as r:
             d = json.loads(r.read().decode("utf-8"))
         clips = (d.get("CLIPLoader", {}).get("input", {}).get("required", {}).get("clip_name") or [[]])[0]
     except Exception:
@@ -1516,9 +1669,9 @@ def advance_chain(server, state):
         if not os.path.exists(video_file):
             q = urllib.parse.urlencode(of)
             try:
-                req = urllib.request.Request(server + "/view?" + q, headers={"User-Agent": "batch-console"})
+                req = urllib.request.Request(server + "/view?" + q, headers={"User-Agent": "batch-console", **_auth_headers(server)})
                 os.makedirs(os.path.dirname(video_file) or OUTPUTS_DIR, exist_ok=True)
-                with _opener().open(req, timeout=600) as r, open(video_file, "wb") as f:
+                with _authed_open(server, req, 600) as r, open(video_file, "wb") as f:
                     f.write(r.read())
             except Exception as e:
                 print(f"[chain] 补下载失败：{e}")
