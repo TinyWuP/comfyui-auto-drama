@@ -714,7 +714,7 @@ def start_assemble_job(project_name="", selection=None, seg_range=None):
 
 # ---------- 图构建与提交 ----------
 
-def build_graphs(tasks):
+def build_graphs(tasks, server=None, warnings=None):
     if not os.path.isdir(DEFAULT_WORKFLOW_DIR):
         return None, f"找不到工作流目录：{DEFAULT_WORKFLOW_DIR}"
     sys.path.insert(0, DEFAULT_WORKFLOW_DIR)
@@ -744,6 +744,8 @@ def build_graphs(tasks):
                 g = bg.build_r2v(task)
             else:
                 return None, f"未知模式：{task['mode']}"
+            if g is not None and server:
+                _degrade_graph(server, g, warnings if warnings is not None else [])
             out.append((task, g))
         except Exception as e:
             return None, f"构建任务 {t.get('id', t.get('name'))} 失败：{e}"
@@ -1255,7 +1257,7 @@ def submit_tasks(server, tasks, auto_download=True, chain_mode=False, role_image
             if t.get("mode") == "r2v":
                 t["r2v_unet"] = use_unet
                 t["r2v_clip"] = use_clip
-    graphs, err = build_graphs(tasks)
+    graphs, err = build_graphs(tasks, server=server, warnings=warnings)
     if err:
         return None, err, warnings
     # I2V 任务先上传首帧图
@@ -1410,6 +1412,101 @@ def submit_tasks(server, tasks, auto_download=True, chain_mode=False, role_image
 
 # 远程模型列表缓存（ComfyUI object_info，120 秒 TTL）
 _MODEL_CACHE = {"t": 0.0, "unets": [], "clips": []}
+
+# 加速节点缺失时的降级配置：透传节点（模型输入直通）与采样器替换
+_ACCEL_PASSTHROUGH = "MiniMaxH3TurboLoRA,MiniMaxH3MemoryEfficientSageAttentionPatch,EasyCache"
+_ACCEL_SAMPLER = "MiniMaxH3TurboSampler"
+_BASELINE_STEPS = 20
+_NODE_OK_CACHE = {}  # (server, class_type) -> (时间, 是否存在)
+
+
+def _node_type_ok(server, ctype):
+    """探测 ComfyUI 是否加载了某节点类（object_info/类名，5 分钟缓存）。
+    探测失败（网络/认证异常）保守返回 True，不误降级。"""
+    key = (server, ctype)
+    now = time.time()
+    hit = _NODE_OK_CACHE.get(key)
+    if hit and now - hit[0] < 300:
+        return hit[1]
+    ok = True
+    try:
+        req = urllib.request.Request(
+            server + "/object_info/" + urllib.parse.quote(ctype),
+            headers={"User-Agent": "batch-console", **_auth_headers(server)},
+        )
+        with _authed_open(server, req, 10) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        ok = bool(d.get(ctype))
+    except Exception:
+        ok = True
+    _NODE_OK_CACHE[key] = (now, ok)
+    return ok
+
+
+def _degrade_graph(server, graph, warnings):
+    """服务器缺少 H3 turbo 加速节点时自动降级：摘除加速链、模型回接 UNETLoader，
+    TurboSampler 换成 KSamplerSelect(euler)，低步数（turbo 档 4-8）提到基线 20 步。
+    保证未装 turbo 加速包的服务器也能出片（慢但可执行）。就地修改并返回 graph。"""
+    if not graph:
+        return graph
+    accel_types = set(_ACCEL_PASSTHROUGH.split(",")) | {_ACCEL_SAMPLER}
+    present = {str(nd.get("class_type")) for nd in graph.values()}
+    cand = present & accel_types
+    if not cand:
+        return graph
+    missing = {t for t in cand if not _node_type_ok(server, t)}
+    if not missing:
+        return graph
+    passthru_removed = {}
+    for nid, nd in graph.items():
+        if nd.get("class_type") in missing and nd.get("class_type") != _ACCEL_SAMPLER:
+            passthru_removed[nid] = dict(nd.get("inputs") or {})
+    # TurboSampler（sampler 槽输出，无透传输入）→ 原地替换为 KSamplerSelect
+    for nid, nd in graph.items():
+        if nd.get("class_type") == _ACCEL_SAMPLER and _ACCEL_SAMPLER in missing:
+            graph[nid] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
+    for nid in passthru_removed:
+        graph.pop(nid, None)
+
+    def _resolve(ref):
+        # 链式透传：被删节点的 model 若也指向被删节点，逐级上溯到活节点
+        seen = 0
+        while isinstance(ref, list) and ref and str(ref[0]) in passthru_removed and seen < 8:
+            ref = passthru_removed[str(ref[0])].get("model")
+            seen += 1
+        return ref
+
+    rewired = False
+    for other in graph.values():
+        for k, v in list(other.get("inputs", {}).items()):
+            if isinstance(v, list) and v and str(v[0]) in passthru_removed:
+                other["inputs"][k] = _resolve(v)
+                rewired = True
+    steps_bumped = False
+    if "MiniMaxH3TurboLoRA" in missing:
+        # turbo LoRA 只适配 4-8 步；缺失后低步数会出废片，统一提回基线步数
+        for nd in graph.values():
+            if nd.get("class_type") == "BasicScheduler":
+                try:
+                    if int(nd.get("inputs", {}).get("steps") or 0) <= 8:
+                        nd["inputs"]["steps"] = _BASELINE_STEPS
+                        steps_bumped = True
+                except Exception:
+                    pass
+    msg = (f"⚠️ ComfyUI 服务器缺少加速节点 {'、'.join(sorted(missing))}（H3 加速包未装或版本过旧），"
+           "本次已自动降级为基线链路"
+           + (f"，步数提到 {_BASELINE_STEPS}（速度明显变慢）" if steps_bumped else "")
+           + "。在服务器装好加速包并重启 ComfyUI 即恢复加速。")
+    warnings.append(msg)
+    print(msg, flush=True)
+    return graph
+
+
+def _build_degraded(server, build_fn, task):
+    """build_xxx + 缺节点降级（链式推进用）；降级提示进控制台日志。"""
+    g = build_fn(task)
+    _degrade_graph(server, g, [])
+    return g
 
 
 def _server_models(server):
@@ -1698,7 +1795,7 @@ def advance_chain(server, state):
                         }
                         sys.path.insert(0, DEFAULT_WORKFLOW_DIR)
                         import build_api_graphs as bg
-                        g = bg.build_i2v(task)
+                        g = _build_degraded(server, bg.build_i2v, task)
                         resp = api_post(server, "/prompt", {"prompt": g, "client_id": "batch_console"})
                         pid = resp.get("prompt_id") if resp else None
                         if pid:
@@ -1722,7 +1819,7 @@ def advance_chain(server, state):
                     "prefix": nxt.get("prefix", ""), "image": "",
                     "seed": random.randrange(10 ** 15),
                 }
-                g = bg.convert_t2v(task)
+                g = _build_degraded(server, bg.convert_t2v, task)
                 resp = api_post(server, "/prompt", {"prompt": g, "client_id": "batch_console"})
                 pid = resp.get("prompt_id") if resp else None
                 if pid:
@@ -1823,7 +1920,7 @@ def advance_chain(server, state):
         }
         build_fn = bg.build_i2v
         try:
-            g = build_fn(task)
+            g = _build_degraded(server, build_fn, task)
             resp = api_post(server, "/prompt", {"prompt": g, "client_id": "batch_console"})
         except Exception as e:
             print(f"[chain] 提交下一段失败：{e}")

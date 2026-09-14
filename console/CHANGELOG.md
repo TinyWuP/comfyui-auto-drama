@@ -5,6 +5,34 @@
 
 ---
 
+## 2026-09-14 · v0.13.24 — 服务器缺 H3 加速节点时自动降级为基线链路
+
+### 本次更新内容
+
+- **问题**：ComfyUI 日志反复 `invalid prompt: Node 'MiniMax-H3 Turbo LoRA' not found`。
+  三个工作流模板/装配都引用 turbo 加速节点（I2V 快照固定带 `MiniMaxH3TurboLoRA →
+  SageAttentionPatch → EasyCache`；T2V 带 TurboLoRA+TurboSampler；R2V 步数≤8 动态插入）。
+  服务器上的 H3 节点包版本不含这些节点 → 每次提交被拒，链式衔接每轮轮询重试刷屏
+- **新增 `_node_type_ok()`**：按类名查 `/object_info/<类名>` 判断服务器是否加载该节点
+  （5 分钟缓存；探测失败保守返回 True，不误降级）
+- **新增 `_degrade_graph()`**：提交前自动降级——
+  透传型加速节点（TurboLoRA/SageAttention/EasyCache）摘除并把 model 引用逐级回接
+  UNETLoader；`MiniMaxH3TurboSampler` 原地替换为 `KSamplerSelect(euler)`（sampler 槽）；
+  turbo LoRA 缺失时把 ≤8 的步数提到基线 20 步（turbo 档低步数无 LoRA 会出废片）；
+  追加用户可见 warning 说明降级与恢复方式
+- **接线**：`build_graphs(tasks, server, warnings)` 在提交路径（含 regenerate 走的
+  submit_tasks）统一降级；链式推进 `advance_chain` 三处图构建改经 `_build_degraded()`
+
+### 影响与验证
+
+- 装了完整加速包的服务器行为完全不变（探测通过即 no-op）；缺包服务器从"反复提交被拒"
+  变为"降级出片（慢）+ 一次性提示"。根因仍应在服务器装齐插件包恢复加速
+- 本机 mock object_info 全缺失/全存在两型服务器，对真实模板装配的 i2v/t2v/r2v 三模式
+  图逐一验证：加速节点摘除、无悬空引用、SamplerCustomAdvanced.sampler 正确重接、
+  步数 4→20、齐全时 no-op；`py_compile` 通过
+
+---
+
 ## 2026-09-14 · v0.13.23 — 修复自动下载把 comfyui-auth 登录页写成 mp4 的静默损坏
 
 ### 本次更新内容
