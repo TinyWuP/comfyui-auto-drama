@@ -134,6 +134,28 @@ DEFAULT_SERVER = _CONFIG["comfyui"]["server"]
 DEFAULT_WORKFLOW_DIR = _abs_path(_CONFIG["comfyui"]["workflow_dir"])
 OUTPUTS_DIR = _abs_path(_CONFIG["storage"]["output_dir"])
 IMAGE_DIRS = [_abs_path(d) for d in _CONFIG["storage"]["asset_dirs"]]
+
+
+def _ensure_storage_dirs():
+    """启动时自动创建配置中的存储目录（新部署机常缺 素材/ 等目录，
+    生图成功后存盘 ENOENT 会被误报成云端生图失败）。"""
+    for d in [OUTPUTS_DIR] + IMAGE_DIRS:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError as e:
+            print(f"[storage] 目录创建失败 {d}：{e}", flush=True)
+
+
+_ensure_storage_dirs()
+
+
+def _save_asset(raw, filename):
+    """素材图统一落盘到 IMAGE_DIRS[0]：先确保目录存在，运行期目录被删也不会 ENOENT。"""
+    os.makedirs(IMAGE_DIRS[0], exist_ok=True)
+    dest = os.path.join(IMAGE_DIRS[0], filename)
+    with open(dest, "wb") as f:
+        f.write(raw)
+    return dest
 LMSTUDIO_URL = _CONFIG["llm"]["local"]["url"]
 LMSTUDIO_MODEL = _CONFIG["llm"]["local"]["model"]
 BOOGU_URL = _CONFIG["image_gen"]["local"]["url"]
@@ -648,6 +670,7 @@ def assemble_project_video(project_name="", selection=None, seg_range=None, prog
                 f.write(f"file '{p.replace(os.sep, '/')}'\n")
         base = _slug(project_name or "项目") or "project"
         outname = f"合成_{base}{seg_label}_{int(time.time())}.mp4"
+        os.makedirs(IMAGE_DIRS[0], exist_ok=True)
         dest = os.path.join(IMAGE_DIRS[0], outname)
         r = subprocess.run(
             ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listfile, "-c", "copy", dest],
@@ -2885,9 +2908,7 @@ def _img_openai(ep, prompt, filename, size="768x1024", timeout=300):
     else:
         import base64 as _b64
         raw = _b64.b64decode(b64)
-    dest = os.path.join(IMAGE_DIRS[0], filename)
-    with open(dest, "wb") as f:
-        f.write(raw)
+    dest = _save_asset(raw, filename)
     return filename, dest
 
 
@@ -2934,9 +2955,7 @@ def _img_dashscope(ep, prompt, filename, size="768x1024", timeout=300):
                 raise RuntimeError("DashScope 任务成功但无图片 URL")
             with _opener().open(url, timeout=timeout) as fr:
                 raw = fr.read()
-            dest = os.path.join(IMAGE_DIRS[0], filename)
-            with open(dest, "wb") as f:
-                f.write(raw)
+            dest = _save_asset(raw, filename)
             return filename, dest
         if status in ("FAILED", "CANCELED"):
             raise RuntimeError(f"DashScope 任务失败：{st}")
@@ -3004,9 +3023,7 @@ def _boogu_local(prompt, filename, size="768x1024", timeout=300):
     raw = base64.b64decode(b64)
     if not filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
         filename += ".png"
-    dest = os.path.join(IMAGE_DIRS[0], filename)
-    with open(dest, "wb") as f:
-        f.write(raw)
+    dest = _save_asset(raw, filename)
     return filename, dest
 
 
@@ -4273,9 +4290,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 raw = base64.b64decode(data_b64)
-                dest = os.path.join(IMAGE_DIRS[0], filename)
-                with open(dest, "wb") as f:
-                    f.write(raw)
+                dest = _save_asset(raw, filename)
             except Exception as e:
                 self._send(400, json.dumps({"error": f"上传失败：{e}"}, ensure_ascii=False))
                 return
@@ -4757,6 +4772,7 @@ class Handler(BaseHTTPRequestHandler):
             proj = st.get("project") or {}
             base = _slug(proj.get("name") or "项目") or "项目"
             outname = f"合成_{base}_合并_{int(time.time())}.mp4"
+            os.makedirs(IMAGE_DIRS[0], exist_ok=True)
             dest = os.path.join(IMAGE_DIRS[0], outname)
             tmpdir = tempfile.mkdtemp(prefix="merge_")
             try:
