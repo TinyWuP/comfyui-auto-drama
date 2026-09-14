@@ -2864,8 +2864,16 @@ def _img_openai(ep, prompt, filename, size="768x1024", timeout=300):
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", **_lm_headers(ep.get("api_key") or "")},
     )
-    with _opener().open(req, timeout=timeout) as r:
-        data = json.loads(r.read().decode("utf-8"))
+    try:
+        with _opener().open(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # 上游（百炼等）4xx/5xx 的 JSON 错误体才有诊断价值，透出来
+        try:
+            detail = e.read().decode("utf-8", "replace")[:600]
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"云端生图 HTTP {e.code}：{detail or e.reason}")
     b64 = data["data"][0].get("b64_json")
     if not b64:
         url = data["data"][0].get("url")
@@ -2953,6 +2961,12 @@ def boogu_generate(prompt, filename, size="768x1024", timeout=300):
             last_err = e
             if backup is None or backup.get("provider") != "local":
                 raise
+            # 云端失败回退本地；本地再失败必须把云端真实错误一并带出，
+            # 否则用户只看到本地 Connection refused，掩盖根因（如百炼 400/401）
+            try:
+                return _boogu_local(prompt, filename, size, timeout)
+            except Exception as e2:
+                raise RuntimeError(f"云端生图失败：{last_err}（本地回退也失败：{e2}）")
     # 本地 Boogu
     try:
         return _boogu_local(prompt, filename, size, timeout)
@@ -2960,7 +2974,10 @@ def boogu_generate(prompt, filename, size="768x1024", timeout=300):
         last_err = e
         if backup and backup.get("provider") == "cloud":
             atype = str(backup.get("provider_type") or "openai").strip() or "openai"
-            return _IMG_ADAPTERS.get(atype, _img_openai)(backup, prompt, filename, size, timeout)
+            try:
+                return _IMG_ADAPTERS.get(atype, _img_openai)(backup, prompt, filename, size, timeout)
+            except Exception as e2:
+                raise RuntimeError(f"本地生图失败：{last_err}（云端降级也失败：{e2}）")
         raise
 
 
@@ -2972,8 +2989,15 @@ def _boogu_local(prompt, filename, size="768x1024", timeout=300):
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": "batch-console"},
     )
-    with _opener().open(req, timeout=timeout) as r:
-        d = json.loads(r.read().decode("utf-8"))
+    try:
+        with _opener().open(req, timeout=timeout) as r:
+            d = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", "replace")[:600]
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"Boogu 生图 HTTP {e.code}：{detail or e.reason}")
     b64 = d.get("data", [{}])[0].get("b64_json")
     if not b64:
         raise RuntimeError("Boogu 未返回图片数据")
@@ -4158,7 +4182,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     fn, dest = boogu_generate(prompt, filename, "768x1024")
                 except Exception as e:
-                    self._send(400, json.dumps({"error": f"Boogu 生图失败：{e}"}, ensure_ascii=False))
+                    self._send(400, json.dumps({"error": f"生图失败：{e}"}, ensure_ascii=False))
                     return
                 attempts += 1
                 v = verify_asset(dest, kind, expected)
