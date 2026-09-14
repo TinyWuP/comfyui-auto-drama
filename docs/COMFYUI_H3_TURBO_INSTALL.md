@@ -14,6 +14,21 @@
 | `MiniMaxH3MemoryEfficientSageAttentionPatch` | **kijai/ComfyUI-KJNodes** | 手动 clone + sageattention（见 §3） |
 | `EasyCache` | ComfyUI **原生内置**（comfy_extras/nodes_easycache） | 升级 ComfyUI 核心（见 §4） |
 
+### 页面显示缺失、但控制台链路"不需要"的两个节点
+
+`MiniMaxH3PromptEnhancer`、`MiniMaxH3GenerationTailLoader`（均来自
+**ethanfel/ComfyUI-MiniMax-H3-Guide**，尾权重
+`qwen3vl_32b_h3_generation_tail_50_63_int8_convrot.safetensors` 放 models/text_encoders）。
+I2V 队列快照里含有它们，但 `build_api_graphs.build_i2v()` 装配时**固定剔除**
+（节点 105:121~124）——本项目用自家规则化提示词直喂 H3，刻意绕过官方增强器。
+ComfyUI-Manager 扫描工作流按节点全集比对，所以页面仍提示缺失；实际提交不受影响，
+可忽略。**仅当**要在 ComfyUI 界面手动打开原始工作流实验增强器时才需要装：
+
+```bash
+cd /opt/app/ComfyUI/custom_nodes
+git clone https://github.com/ethanfel/ComfyUI-MiniMax-H3-Guide
+```
+
 其余节点（`MiniMaxH3ImageToVideo` / `MiniMaxH3ReferenceToVideo` / `ComfyMathExpression` /
 `ResolutionSelector` / `CreateVideo` / `SaveVideo` 等）服务器已验证可用（R2V 成片
 `麦田十年_01` 跑通过 20 分钟全步数链路），无需处理。
