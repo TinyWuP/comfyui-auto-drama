@@ -2657,25 +2657,35 @@ async function genAllAssets() {
   });
   const total = todo.length;
   if (!total) { toast('没有可生成的资产', true); return; }
-  toastLoading(`⚡ 一键生成中（共 ${total} 张，每张约 10-30 秒）…`);
+  toastLoading(`⚡ 一键生成中（共 ${total} 张，每张约 30-60 秒，请保持页面打开）…`);
   $('assetProgress').style.display = '';
   $('assetBar').style.width = '0%';
   let doneN = 0;
   const tick = (label) => {
     doneN++;
     $('assetBar').style.width = `${Math.round(doneN / total * 100)}%`;
-    $('assetProgressText').textContent = `已生成 ${doneN}/${total} 张 · ${label}`;
+    $('assetProgressText').textContent = `已处理 ${doneN}/${total} 张 · ${label}`;
   };
-  try {
-    for (const t of todo) {
+  // 单张失败不再中断整批：记录错误继续跑完，结束后汇总（缺失项再点一次即续跑）
+  const failed = [];
+  for (const t of todo) {
+    try {
       await t.fn();
-      tick(t.label);
+    } catch (e) {
+      failed.push(`${t.label}：${e.message || e}`);
     }
-    renderAssets();
-    autoSaveProject(true);
-    $('assetProgress').style.display = 'none';
+    tick(t.label);
+  }
+  renderAssets();
+  autoSaveProject(true);
+  $('assetProgress').style.display = 'none';
+  if (failed.length) {
+    const more = failed.length > 3 ? ` …等共 ${failed.length} 项` : '';
+    toast(`⚠️ 完成 ${total - failed.length}/${total} 张，失败 ${failed.length} 张：${failed.slice(0, 3).join('；')}${more}（可再点一键生成续跑缺失项）`, true);
+    console.warn('一键生成失败清单:', failed);
+  } else {
     toast(`✅ 一键生成完成，共 ${total} 张`);
-  } catch (e) { $('assetProgress').style.display = 'none'; toast('一键生成中断：' + e.message, true); renderAssets(); }
+  }
 }
 
 async function genRoleViewAsset(i, view) {

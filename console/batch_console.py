@@ -2887,16 +2887,26 @@ def _img_openai(ep, prompt, filename, size="768x1024", timeout=300):
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", **_lm_headers(ep.get("api_key") or "")},
     )
-    try:
-        with _opener().open(req, timeout=timeout) as r:
-            data = json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        # 上游（百炼等）4xx/5xx 的 JSON 错误体才有诊断价值，透出来
+    # 批量连续调用易触发厂商限流：429/5xx 退避重试（4s/12s/30s，共 4 次机会）
+    last_e = None
+    for attempt, backoff in enumerate((0, 4, 12, 30)):
+        if backoff:
+            time.sleep(backoff)
         try:
-            detail = e.read().decode("utf-8", "replace")[:600]
-        except Exception:
-            detail = ""
-        raise RuntimeError(f"云端生图 HTTP {e.code}：{detail or e.reason}")
+            with _opener().open(req, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            last_e = None
+            break
+        except urllib.error.HTTPError as e:
+            try:
+                detail = e.read().decode("utf-8", "replace")[:600]
+            except Exception:
+                detail = ""
+            last_e = RuntimeError(f"云端生图 HTTP {e.code}：{detail or e.reason}")
+            if e.code != 429 and e.code < 500:
+                break  # 参数/鉴权类错误重试无意义
+    if last_e is not None:
+        raise last_e
     b64 = data["data"][0].get("b64_json")
     if not b64:
         url = data["data"][0].get("url")
