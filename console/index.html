@@ -2118,7 +2118,7 @@ async function checkBoogu() {
   try {
     const r = await fetch('/api/boogu_check');
     const d = await r.json();
-    el.textContent = d.ok ? '✅ Boogu 生图服务在线（本地生成）' : `⚠️ Boogu 未启动（${d.error || ''}）`;
+    el.textContent = d.ok ? `✅ 生图服务在线（${d.provider === 'cloud' ? '云端 API' : '本地生成'}）` : `⚠️ 生图服务不可用（${d.error || ''}）`;
   } catch (e) { el.textContent = '⚠️ 检测失败'; }
 }
 

@@ -5,6 +5,29 @@
 
 ---
 
+## 2026-09-14 · v0.13.17 — 生图健康检查跟随 provider 配置（修 boogu_check 误报本地拒连）
+
+### 本次更新内容
+
+- `boogu_check`（`/api/boogu_check`）不再只探测 `image_gen.local.url`：改为走
+  `_image_gen_endpoints()`，与真实生图调用同一套路由——`provider=cloud` 且 cloud.enabled
+  时优先探测云端 `/models`（带 `Authorization: Bearer api_key`），再回退探测本地；
+  `provider=local` 时先本地、失败回退云端（云端未启用则只报本地错误）
+- 云端 HTTPS 首次失败自动放宽超时（4s→8s）重试一次，抗网络抖动
+- 响应新增 `provider` 字段（cloud/local）与 `checked_url`；前端参考资产界面状态文案
+  改为如实显示「生图服务在线（云端 API / 本地生成）」，不再写死 Boogu 本地
+- 修复场景：config 配 `image_gen.provider=cloud`（如百炼 qwen-image）时，
+  本地 8081 无服务导致界面误报 `Connection refused`
+
+### 影响与注意事项
+
+- 需重启控制台生效；生成逻辑本就按 provider 路由（云端配置下实际生图走的是百炼），
+  本次只修健康检查误导问题
+- 验证方式：模拟「local 拒连 + cloud 正常」双端点测试，cloud 模式返回
+  `{"ok": true, "provider": "cloud", "models": [...]}`；已实测通过
+
+---
+
 ## 2026-09-14 · v0.13.16 — 兼容 comfyui-auth 认证插件（ComfyUI 登录鉴权）
 
 ### 本次更新内容

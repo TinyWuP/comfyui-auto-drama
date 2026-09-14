@@ -2796,13 +2796,38 @@ def check_lmstudio(token="", timeout=6):
 
 
 def boogu_check(timeout=4):
-    try:
-        req = urllib.request.Request(_v1(BOOGU_URL) + "/models", headers={"User-Agent": "batch-console"})
-        with _opener().open(req, timeout=timeout) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        return {"ok": True, "models": [m.get("id") for m in data.get("data", [])]}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    """生图服务健康检查：跟随 image_gen.provider 配置——cloud 且已启用时探测云端端点
+    （/models），本地不可用再回退探测本地；local 模式保持原探测逻辑。"""
+    ep_main, ep_backup = _image_gen_endpoints()
+    last_err = "生图端点未配置"
+    for ep in (ep_main, ep_backup):
+        if not ep or not ep.get("url"):
+            continue
+        try:
+            req = urllib.request.Request(
+                _v1(ep["url"]) + "/models",
+                headers=_lm_headers(ep.get("api_key") or ""),
+            )
+            with _opener().open(req, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            models = [m.get("id") for m in data.get("data", [])]
+            return {"ok": True, "models": models, "provider": ep.get("provider", "local")}
+        except Exception as e:
+            last_err = e
+            if ep.get("provider") == "cloud" and timeout < 8:
+                # 云端多为 HTTPS + 鉴权，网络抖动时放宽超时重试一次
+                try:
+                    req = urllib.request.Request(
+                        _v1(ep["url"]) + "/models",
+                        headers=_lm_headers(ep.get("api_key") or ""),
+                    )
+                    with _opener().open(req, timeout=8) as r:
+                        data = json.loads(r.read().decode("utf-8"))
+                    models = [m.get("id") for m in data.get("data", [])]
+                    return {"ok": True, "models": models, "provider": "cloud"}
+                except Exception as e2:
+                    last_err = e2
+    return {"ok": False, "error": str(last_err), "checked_url": _v1(ep_main["url"]) + "/models" if ep_main and ep_main.get("url") else BOOGU_URL}
 
 
 def _image_gen_endpoints():
