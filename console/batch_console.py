@@ -1446,12 +1446,34 @@ def download_outputs(server, outputs):
         })
         dest = os.path.join(OUTPUTS_DIR, o["type"], o["subfolder"], o["filename"])
         os.makedirs(os.path.dirname(dest) or OUTPUTS_DIR, exist_ok=True)
+        tmp = dest + ".part"
         try:
-            req = urllib.request.Request(server + "/view?" + q, headers={"User-Agent": "batch-console"})
-            with _opener().open(req, timeout=600) as r, open(dest, "wb") as f:
-                f.write(r.read())
-        except Exception:
+            req = urllib.request.Request(
+                server + "/view?" + q,
+                headers={"User-Agent": "batch-console", **_auth_headers(server)},
+            )
+            # 必须走 _authed_open：裸 opener 在 comfyui-auth 下会被 302 到登录页，
+            # 把几 KB 的 HTML 写成 mp4（状态 200，静默损坏）
+            with _authed_open(server, req, 600) as r:
+                data = r.read()
+                ctype = (r.headers.get("Content-Type") or "").lower()
+            head = data[:512].lstrip()[:64].lower()
+            if not data or head.startswith(b"<!doctype") or head.startswith(b"<html") or "text/html" in ctype:
+                print(f"[download] 拒绝保存疑似登录页/空响应：{o['filename']}（ctype={ctype}, {len(data)}B）")
+                ok_all = False
+            else:
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, dest)
+        except Exception as e:
+            print(f"[download] 下载失败 {o['filename']}: {e}")
             ok_all = False
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
     return ok_all
 
 
@@ -1731,6 +1753,17 @@ def advance_chain(server, state):
                 continue
         png = extract_last_frame(video_file)
         if not png:
+            # 自愈：历史 bug（未认证下载把登录页 HTML 写成 mp4）造成的损坏文件，
+            # 删除并清 downloaded 标记，下一轮轮询自动从 ComfyUI 重下
+            try:
+                with open(video_file, "rb") as f:
+                    head = f.read(256).lstrip()[:16].lower()
+                if head.startswith(b"<!doctype") or head.startswith(b"<html"):
+                    os.remove(video_file)
+                    t["downloaded"] = False
+                    print(f"[chain] 本地视频是登录页HTML损坏文件，已删除待重下：{of['filename']}")
+            except Exception:
+                pass
             print(f"[chain] 抽帧失败：{t.get('name')}")
             continue
         chain_img = f"chain_{t['id']}.png"

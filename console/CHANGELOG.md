@@ -5,6 +5,29 @@
 
 ---
 
+## 2026-09-14 · v0.13.23 — 修复自动下载把 comfyui-auth 登录页写成 mp4 的静默损坏
+
+### 本次更新内容
+
+- **根因**：`download_outputs()` 用裸 `_opener()`（不带认证会话）。comfyui-auth 开启时
+  未认证 GET `/view` 返回登录页 HTML（200），被原样写进 `comfyui_backup/outputs/**/*.mp4`
+  ——表现为"本地 4.0K / ComfyUI 侧 2.7M 且 ComfyUI 可正常播放"。状态 200 不触发异常，
+  `downloaded=True` 完全静默；链式衔接抽帧失败（ffmpeg 读到 HTML）是它的下游症状
+- **修复 1**：`download_outputs` 改走 `_authed_open(server, req)`（带 cookie 会话、401 自动
+  重登重试），并加内容守卫：响应体以 `<!doctype`/`<html` 开头或 `Content-Type: text/html`
+  一律拒绝落盘（返回失败可重试）；写盘改 `.part` 临时文件 + `os.replace` 原子替换，
+  不再产生半截文件；失败/拒绝都打印明确日志
+- **修复 2（自愈）**：`advance_chain` 抽帧失败时检测本地 mp4 头部是否为 HTML，是则删除
+  并清 `downloaded` 标记，下一轮轮询自动重下（历史损坏文件无需人工清理）
+
+### 影响与验证
+
+- 本机 mock comfyui-auth 服务器三场景回归全过：开启认证下载到真视频字节（3000B 完整）、
+  服务器回 HTML 时拒绝落盘、密码错误明确报错；`py_compile` 通过
+- 部署后对已损坏的 `麦田十年_01` 等文件，链条轮询会自愈重下；或手动删除后等下一轮
+
+---
+
 ## 2026-09-14 · v0.13.22 — 链式抽帧加固：两档策略 + 失败诊断打印
 
 ### 本次更新内容
