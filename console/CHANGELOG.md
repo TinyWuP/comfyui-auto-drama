@@ -5,6 +5,43 @@
 
 ---
 
+## 2026-09-15 · v0.13.25 — 修复链头被吞进 waiting 导致的"提交无反应"死锁
+
+### 本次更新内容
+
+- **现象**：点"🚀 提交任务"页面看似无反应、ComfyUI 日志零输出。实测按钮链路正常
+  （`/api/enhance_all` → `/api/submit` 200、toast"提交成功 10/10"），但 10 段任务
+  含链头在内全部 `chain_waiting=True、prompt_id=None`——链头没人提交，全链死等
+- **根因（submit_tasks 的 has_open_chain 误判）**：状态里残留一批"卡死的历史链"
+  （所有段 chain_waiting 且从未拿到 prompt_id，如 v5）。旧判定只检查"等待任务之前
+  有没有 error 段"，这种链没有任何 error → 被判"健康开链"→ 新批次 idx=0 的链头
+  也被吸收进 waiting。而 `advance_chain` 只推进"上段已提交"的任务，waiting 链头
+  没有前驱 → 永远无人提交 → 每次重提都死锁，且 waiting 头无 submitted 超时检测、
+  永不标 error，自愈路径也进不去
+- **修复①（submit_tasks）**：`has_open_chain` 沿 `chain_prev` 上溯到链头，链头必须
+  已提交（有 `prompt_id`）才算"健康开链"；链头从未提交的死链不吸收新任务，
+  新批次链头直接真实提交
+- **修复②（advance_chain）**：新增 `_submit_waiting_head()` 自愈——发现等待中且
+  无有效前驱的链头（已卡死的历史状态），按其模式（R2V 补转换六段式+模型预检+上传
+  参考图 / I2V 上传首帧 / 缺图自动降级 T2V）构建图并提交 ComfyUI，成功即清
+  `chain_waiting`，链条恢复正常推进
+- **服务器处置**：部署后重启守护进程，v6 死锁链由修复②自动解开（日志出现
+  `[chain] 链头自愈提交：…`），无需手动清状态重提
+
+### 影响
+
+- 只影响链式模式提交路径；非链式提交与此前一致
+- 已死锁的 v6 批次无需人工干预，重启控制台后 ≤20 秒自动提交链头
+
+### 验证方式
+
+- 语法：`python3 -c "import ast; ast.parse(open('console/batch_console.py').read())"`
+- 服务器实测：重启 `start_daemons.py` 后 `chain_daemon.log` 出现
+  `[chain] 链头自愈提交：麦田十年_01_v6`；`/api/status` 中该段状态由
+  `waiting` 变 `queued/running`；ComfyUI `comfyui.log` 出现执行日志
+
+---
+
 ## 2026-09-14 · v0.13.24 — 服务器缺 H3 加速节点时自动降级为基线链路
 
 ### 本次更新内容

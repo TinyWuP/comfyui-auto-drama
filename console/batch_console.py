@@ -1293,12 +1293,26 @@ def submit_tasks(server, tasks, auto_download=True, chain_mode=False, role_image
     if role_images or scene_image:
         save_state(state)
     # 链式判定：本次 idx>0，或状态里已有"健康"未结束链 → 新任务追加链尾等待。
-    # 死链（等待任务之前已有失败段）不吸收新任务，新任务自成新链。
+    # 死链（等待任务之前已有失败段，或链头本身从未提交成功）不吸收新任务。
+    # v0.13.25 修复：旧判定只看"等待任务之前没有 error 段"，但历史上链头提交
+    # 失败/被吞进 waiting 的死链（等待头无 prompt_id 且无前驱）会被误判为健康开链，
+    # 导致新批次 idx=0 的链头也被吞进 waiting——而 waiting 链头没有任何人负责提交，
+    # 全链永远等待、ComfyUI 收不到任何 /prompt（表现为"点了提交没反应、ComfyUI 无日志"）。
+    # 现在沿 chain_prev 上溯到链头：链头必须已提交（有 prompt_id）才算开链。
     has_open_chain = False
     for i, x in enumerate(state["tasks"]):
         if x.get("chain_waiting") and not x.get("prompt_id"):
+            ref = x.get("chain_prev")
+            prev = next((p for p in state["tasks"] if p.get("id") == ref), None) if ref else None
+            hops = 0
+            while (prev is not None and prev.get("chain_waiting")
+                   and not prev.get("prompt_id") and hops < 50):
+                ref2 = prev.get("chain_prev")
+                prev = next((p for p in state["tasks"] if p.get("id") == ref2), None) if ref2 else None
+                hops += 1
+            head_ok = bool(prev and prev.get("prompt_id"))
             dead = any(t.get("error") for t in state["tasks"][:i])
-            has_open_chain = not dead
+            has_open_chain = head_ok and not dead
             break
     results = []
     # 查询远程队列：只有上一版还在生成/排队（running/pending）才拦截重提；
@@ -1745,11 +1759,80 @@ def get_status(server):
     return {"server_ok": True, "tasks": out}
 
 
+def _submit_waiting_head(server, t):
+    """v0.13.25 链头自愈：链头卡在 chain_waiting 且从未提交（历史死锁状态）时，
+    按任务当前模式补齐参考图上传、构建工作流图并提交到 ComfyUI。成功返回 True。"""
+    mode = str(t.get("mode") or "t2v").lower()
+    task = dict(t)
+    task.setdefault("seed", random.randrange(10 ** 15))
+    try:
+        if mode == "r2v":
+            imgs = [x for x in (t.get("images") or []) if x]
+            if not imgs:
+                mode = "t2v"
+            else:
+                task["prompt"] = to_ref2va_six_section(t.get("prompt", ""), t)
+                r2v_cfg = (_CONFIG.get("models") or {}).get("r2v") or {}
+                wu = r2v_cfg.get("unet") or "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+                wc = r2v_cfg.get("clip") or "qwen3vl_32b_h3_ultra_uncensored_heretic_int8_convrot.safetensors"
+                unets, clips = _server_models(server)
+                if unets and wu not in unets:
+                    wu = ("minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+                          if "minimax_h3_fl2va_pruned_int8_convrot.safetensors" in unets
+                          else unets[0])
+                if clips and wc not in clips:
+                    wc = clips[0]
+                task["r2v_unet"], task["r2v_clip"] = wu, wc
+                for img in imgs:
+                    lp = find_image(img)
+                    if not lp:
+                        print(f"[chain] 链头自愈：本地找不到参考图 {img}，跳过")
+                        return False
+                    upload_image(server, lp, img)
+        if mode == "i2v":
+            img = t.get("image") or ""
+            lp = find_image(img) if img else None
+            if not lp:
+                mode = "t2v"
+            else:
+                upload_image(server, lp, img)
+                task["prompt"] = ensure_i2v_prompt(t.get("prompt", ""))
+        if mode == "t2v":
+            task["image"] = ""
+        sys.path.insert(0, DEFAULT_WORKFLOW_DIR)
+        import build_api_graphs as bg
+        build_fn = {"r2v": bg.build_r2v, "i2v": bg.build_i2v}.get(mode, bg.convert_t2v)
+        g = _build_degraded(server, build_fn, task)
+        resp = api_post(server, "/prompt", {"prompt": g, "client_id": "batch_console"})
+        pid = resp.get("prompt_id") if resp else None
+        if not pid:
+            print(f"[chain] 链头自愈提交异常：{resp}")
+            return False
+        t["prompt_id"] = pid
+        t["mode"] = mode
+        t["chain_waiting"] = False
+        t["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[chain] 链头自愈提交：{t.get('name')}（{mode}，{pid}）", flush=True)
+        return True
+    except Exception as e:
+        print(f"[chain] 链头自愈异常：{e}", flush=True)
+        return False
+
+
 def advance_chain(server, state):
     """链式衔接：上一段完成并下载后，抽最后一帧上传，提交下一段。"""
     tasks = state.get("tasks", [])
     changed = False
     by_id = {t.get("id"): t for t in tasks}
+    # v0.13.25 自愈：等待中的链头（无 chain_prev 或前驱已不存在）没有任何人会提交它，
+    # 直接补提交，解开"整链 waiting、ComfyUI 零请求"的死锁
+    for t in tasks:
+        if not t.get("chain_waiting") or t.get("prompt_id"):
+            continue
+        if t.get("chain_prev") and t["chain_prev"] in by_id:
+            continue
+        if _submit_waiting_head(server, t):
+            changed = True
     for i, nxt in enumerate(tasks):
         if not nxt.get("chain_waiting") or nxt.get("prompt_id"):
             continue
