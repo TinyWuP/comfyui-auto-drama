@@ -20,6 +20,9 @@
   重载时清空跨项目的"合并"勾选状态并把越界页码归零；`openProject` 切项目后
   立即刷新任务列表（refreshStatus）与合成历史，并清 `assembleVersionsCache`
   （版本候选弹窗按项目取段）
+- **竞态修正**：页面初始化时 `loadAssembleHistory` 与 `loadProject` 并发，
+  `currentProjectName` 未就绪导致按空串（=全量）请求 → 改为
+  `loadProject().then(() => loadAssembleHistory())`，保证首帧即按项目过滤
 
 ### 影响
 
