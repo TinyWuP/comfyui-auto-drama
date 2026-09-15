@@ -4508,22 +4508,32 @@ class Handler(BaseHTTPRequestHandler):
             proj = qs.get("project", [""])[0]
             if str(server).strip().lower() in ("all", "*"):
                 # v0.13.32 多实例总览：逐个注册实例查询并合并（链任务按归属实例路由）
-                servers = _server_list()
-                merged, errs = [], []
-                for s in servers:
-                    r = get_status(s["url"], proj)
-                    if not r.get("server_ok"):
-                        errs.append(f"{s['url']}：{r.get('error')}")
-                        continue  # 该实例原始任务 dict 结构不同，不并入，只报连接错误
-                    merged.extend(x for x in (r.get("tasks") or []) if isinstance(x, dict))
-                def _rank(x):
-                    return {"running": 0, "queued": 1, "waiting": 2, "completed": 3, "error": 4}.get(x.get("status"), 5)
-                merged.sort(key=lambda x: str(x.get("submitted_at") or ""), reverse=True)
-                merged.sort(key=lambda x: _rank(x.get("status")))
-                self._send(200, json.dumps({
-                    "server_ok": len(errs) < len(servers), "tasks": merged,
-                    "error": "；".join(errs) if errs else None,
-                }, ensure_ascii=False))
+                try:
+                    servers = _server_list()
+                    merged, errs = [], []
+                    for s in servers:
+                        r = get_status(s["url"], proj)
+                        if not r.get("server_ok"):
+                            errs.append(f"{s['url']}：{r.get('error')}")
+                            continue  # 该实例原始任务 dict 结构不同，不并入，只报连接错误
+                        for x in (r.get("tasks") or []):
+                            if isinstance(x, dict):
+                                merged.append(x)
+                            else:
+                                errs.append(f"{s['url']} 返回非任务项：{type(x).__name__}")
+                    def _rank(x):
+                        return {"running": 0, "queued": 1, "waiting": 2, "completed": 3, "error": 4}.get(x.get("status"), 5)
+                    merged.sort(key=lambda x: str(x.get("submitted_at") or ""), reverse=True)
+                    merged.sort(key=lambda x: _rank(x.get("status")))
+                    self._send(200, json.dumps({
+                        "server_ok": len(errs) < len(servers), "tasks": merged,
+                        "error": "；".join(errs) if errs else None,
+                    }, ensure_ascii=False))
+                except Exception as e:
+                    import traceback as _tb
+                    self._send(500, json.dumps({
+                        "server_ok": False, "error": f"{e}\n{_tb.format_exc()[-1200:]}", "tasks": [],
+                    }, ensure_ascii=False))
                 return
             self._send(200, json.dumps(get_status(server, proj), ensure_ascii=False))
             return
