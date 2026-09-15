@@ -4092,6 +4092,34 @@ def parse_script_json(text):
         "scene_image": scene_image,
         "warnings": list(dict.fromkeys(warnings)),
     }
+    # 规范化分镜剧本（保留 scene/action/dialogue 等展示字段）：前端第 2 步表格直接
+    # 渲染这份数据。此前只回传任务行（prompt/mode），前端把分镜字段全部置空，
+    # 导致粘贴标准剧本 JSON 后表格显示一片空白（v0.13.27 修复）。
+    sb_list = []
+    for i, sb in enumerate(storyboards):
+        dlg = _pick(sb, "dialogue", "line", "lines") or ""
+        if isinstance(dlg, list):
+            dlg = " ".join(str(x) for x in dlg)
+        sb_list.append({
+            "id": i + 1,
+            "scene": str(_pick(sb, "scene", "location", "place", "scene_name") or "").strip(),
+            "roles": _sb_roles(sb),
+            "action": str(_pick(sb, "action", "content", "description") or "").strip(),
+            "dialogue": str(dlg).strip(),
+            "emotion": str(_pick(sb, "emotion", "mood") or "").strip(),
+            "camera": str(_pick(sb, "camera", "camera_movement", "shot") or "").strip(),
+            "duration": _sb_duration(sb),
+            "prompt": rows[i]["prompt"] if i < len(rows) else "",
+        })
+    meta["script"] = {
+        "title": title,
+        "logline": str(_pick(data, "logline", "summary", "synopsis") or "").strip(),
+        "role_list": [
+            {"role_name": rn, "role_desc": str((r or {}).get("role_desc") or (r or {}).get("description") or "").strip()}
+            for rn, r in role_map.items()
+        ],
+        "storyboard_list": sb_list,
+    }
     return rows, meta
 
 

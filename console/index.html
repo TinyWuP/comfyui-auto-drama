@@ -1011,12 +1011,14 @@ async function doPaste() {
     toastClear();
     if (!r.ok) { toast(d.error, true); return; }
     if (d.script) {
-      // AI 转换 / 剧本 JSON
+      // AI 转换 / 剧本 JSON（后端返回规范化分镜，表格直接渲染）
       scriptBefore = d.script;
       currentScript = scriptBefore;
       renderScriptTable(d.script);
-      $('genHint').textContent = `✅ AI 已转换为 ${(d.script.storyboard_list||[]).length} 段分镜`;
-      toast('剧本已转换，可在第 3 步改写或直接下一步');
+      const n = (d.script.storyboard_list || []).length;
+      $('genHint').textContent = tab === 'tabFragment' ? `✅ AI 已转换为 ${n} 段分镜` : `✅ 已导入 ${n} 段分镜`;
+      toast('剧本已导入，可在第 3 步改写或直接下一步');
+      (d.warnings || []).slice(0, 2).forEach(w => setTimeout(() => toast(w, true), 600));
     } else {
       const rows = d.tasks || [];
       if (d.detected === 'prompts') {

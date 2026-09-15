@@ -5,6 +5,34 @@
 
 ---
 
+## 2026-09-15 · v0.13.27 — 修复粘贴剧本 JSON 导入后第 2 步表格全空白
+
+### 本次更新内容
+
+- **现象**：「脚本生成 → 粘贴剧本（JSON）」导入 `examples/demo_script.json`，提示
+  "已导入 10 段"但分镜表格里场景/角色/动作/对白/情绪/运镜全部空白
+- **根因**：`/api/import_script` 只返回"任务行"（name/mode/prompt/duration），不含
+  分镜展示字段；前端把任务行硬转成 storyboard 时把这些字段写死为空串（v0.13.26 前
+  index.html 1028~1031），表格无从显示。数据其实没丢（提示词已生成），纯展示缺陷
+- **修复①（后端 parse_script_json）**：meta 附加规范化 `script` 对象（title/logline/
+  role_list/storyboard_list，分镜保留 scene/roles/action/dialogue/emotion/camera/
+  duration，并带上已生成的 prompt），与 `/api/parse_script_text` 的返回形状统一
+- **修复②（前端 doPaste）**：d.script 分支复用（原本就存在，此前 JSON 路径拿不到
+  script 字段才落入空白分支），提示措辞区分"AI 转换/导入"，透传 warnings 前两条
+  （如角色未匹配到参考图的提醒此前被吞）
+
+### 影响
+
+- 导入后第 2 步表格完整可编辑，后续第 3/4 步（改写/生成提示词）可正常流转；
+  粘贴的 prompt 字段保留在分镜行上，buildPrompts 的 hasPrompt 检测会优先沿用
+
+### 验证方式
+
+- 本机直跑 `parse_script_json(demo_script.json)`：10 段、title/roles/六字段齐全
+- `node --check` 前端内联脚本通过；浏览器实测导入后表格渲染正常
+
+---
+
 ## 2026-09-15 · v0.13.26 — 状态列表新增"仅显示每段最新版本"开关
 
 ### 本次更新内容
