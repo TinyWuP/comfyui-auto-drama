@@ -457,6 +457,7 @@
           <input type="checkbox" id="latestOnly" onchange="setLatestOnly(this.checked)"> 仅显示每段最新版本
         </label>
       </div>
+      <div id="pipelineBar" class="hint" style="margin:6px 0 2px;display:flex;flex-wrap:wrap;gap:10px;align-items:center"></div>
       <div id="statusCards"><div class="empty"><div class="big">🎬</div>提交后这里实时显示每段状态</div></div>
       <div class="card" style="margin-top:18px;box-shadow:none;background:#f8fafc">
         <h2 style="font-size:15px">🎬 合成完整视频</h2>
@@ -1522,6 +1523,46 @@ async function refreshStatus() {
     statusTasksCache = d.tasks;
     renderStatusCards();
   } catch (e) { $('statusCards').innerHTML = '<div class="empty">状态刷新失败</div>'; }
+  finally { renderPipelineBar(); }
+}
+
+// ---------- v0.13.33 当前任务状态/进度总览条（本项目 + ComfyUI 双卡） ----------
+async function renderPipelineBar() {
+  const bar = $('pipelineBar');
+  if (!bar) return;
+  const proj = (statusTasksCache || []).filter(t => String(t.name || '').includes(currentProjectName || '\u0000'));
+  const cnt = {};
+  const list = proj.length ? proj : statusTasksCache;
+  list.forEach(t => { cnt[t.status] = (cnt[t.status] || 0) + 1; });
+  const order = ['running', 'queued', 'waiting', 'completed', 'error'];
+  const badge = order.filter(s => cnt[s]).map(s => {
+    const color = {running: 'var(--blue)', queued: '#b8860b', waiting: 'var(--muted)', completed: 'var(--green)', error: 'var(--red)'}[s];
+    const label = {running: '生成中', queued: '排队', waiting: '等待链', completed: '完成', error: '失败'}[s];
+    return `<span style="color:${color};font-weight:600">${label} ${cnt[s]}</span>`;
+  }).join(' · ');
+  const total = list.length;
+  const doneN = cnt.completed || 0;
+  const pctBar = total ? `<span title="${doneN}/${total} 已完成" style="display:inline-flex;align-items:center;gap:6px">
+      <span style="display:inline-block;width:120px;height:8px;border-radius:4px;background:rgba(120,120,120,.2);overflow:hidden;vertical-align:middle">
+        <span style="display:block;height:100%;width:${Math.round(doneN / total * 100)}%;background:var(--green)"></span></span>
+      ${doneN}/${total}</span>` : '';
+  // ComfyUI 双卡实时（/api/servers 负载 + /api/comfyui_progress 运行任务与步进度）
+  let gpuHtml = '';
+  try {
+    const sv = await (await fetch('/api/servers')).json();
+    const pr = await (await fetch('/api/comfyui_progress')).json();
+    const prMap = {}; (pr.items || []).forEach(x => prMap[x.url] = x);
+    gpuHtml = (sv.servers || []).map(s => {
+      const p = prMap[s.url] || {};
+      const run = (p.running || []).map(t => `${t.task}${t.pct != null ? ' ' + t.pct + '%' : ''}`).join('、');
+      const free = s.vram_free_mb != null ? `余${(s.vram_free_mb / 1024).toFixed(0)}G` : '';
+      const state = !s.ok ? '<span style="color:var(--red)">离线</span>'
+        : run ? `<span style="color:var(--blue)">▶ ${esc(run)}</span>${s.pending ? ` <span style="color:#b8860b">+排队${s.pending}</span>` : ''}`
+        : '空闲';
+      return `<span title="${esc(s.url)}">${esc((s.name || '').replace(/实例[:：]?/, ':'))} ${free} · ${state}</span>`;
+    }).join('&nbsp;&nbsp;');
+  } catch (e) { gpuHtml = '<span>GPU 状态获取失败</span>'; }
+  bar.innerHTML = `<span style="font-weight:600">${esc(currentProjectName || '当前项目')}</span> ${badge || '无任务'} ${pctBar}<span style="flex:1"></span>${gpuHtml}`;
 }
 function renderStatusCards() {
   const tasks = latestOnlyMode ? visibleTasks(statusTasksCache) : statusTasksCache;

@@ -1442,14 +1442,19 @@ def submit_tasks(server, tasks, auto_download=True, chain_mode=False, role_image
     results = []
     # 查询远程队列：只有上一版还在生成/排队（running/pending）才拦截重提；
     # 已完成/失败/丢失的旧任务可再次提交，版本号从已有最大序号往后接（v2/v3…）
-    try:
-        _q = api_get(server, "/queue")
-        active_pids = {t[1] for t in _q.get("queue_running", [])} | {t[1] for t in _q.get("queue_pending", [])}
-        _queue_ok = True
-    except Exception:
-        _queue_ok = False
-    if not _queue_ok:
-        # 查不到队列时保守处理：所有已提交的旧任务都视为活跃，避免误重提
+    # v0.13.33 多实例：必须查**所有**注册实例的队列——只查目标实例会漏掉
+    # 别的卡上正在跑的同段任务，连点提交会创建多条并行链
+    active_pids = set()
+    _queue_ok = True
+    for _srv in {server} | {s["url"] for s in _server_list()}:
+        try:
+            _q = api_get(_srv, "/queue")
+            active_pids |= {t[1] for t in _q.get("queue_running", [])}
+            active_pids |= {t[1] for t in _q.get("queue_pending", [])}
+        except Exception:
+            _queue_ok = False
+    if not _queue_ok and not active_pids:
+        # 全部实例队列都查不到时保守处理：已提交的旧任务都视为活跃，避免误重提
         active_pids = {x.get("prompt_id") for x in state["tasks"] if x.get("prompt_id")}
 
     def _next_task_version(base, tasks):
@@ -4508,7 +4513,8 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(path.query)
             server = qs.get("server", [DEFAULT_SERVER])[0]
             proj = qs.get("project", [""])[0]
-            if str(server).strip().lower() in ("all", "*"):
+            # v0.13.33：auto 在"查看"语境等价 all（总览合并）；提交语境的 auto 才是分配
+            if str(server).strip().lower() in ("all", "*", "auto", "__auto__"):
                 # v0.13.32 多实例总览：逐个注册实例查询并合并（链任务按归属实例路由）
                 try:
                     servers = _server_list()
@@ -4547,6 +4553,45 @@ class Handler(BaseHTTPRequestHandler):
                 "servers": _servers_with_stats(refresh=refresh),
                 "default": DEFAULT_SERVER,
             }, ensure_ascii=False))
+            return
+        if path.path == "/api/comfyui_progress":
+            # v0.13.33 总览条：各实例正在生成的任务 + ComfyUI 队列进度百分比。
+            # /prompt_progress 为新版 ComfyUI 端点；不支持时进度为 None（只显示状态）
+            proj = urllib.parse.parse_qs(path.query).get("project", [""])[0]
+            st = load_state()
+            name_by_pid = {}
+            for t in st.get("tasks", []):
+                if t.get("prompt_id"):
+                    name_by_pid[t["prompt_id"]] = t.get("name") or t.get("id")
+            items, any_err = [], False
+            for e in _servers_with_stats(refresh=True):
+                row = {"url": e["url"], "name": e["name"], "ok": e["ok"],
+                       "running": [], "pending": 0,
+                       "vram_free_mb": e.get("vram_free_mb"), "error": e.get("error")}
+                if e["ok"]:
+                    row["pending"] = e.get("pending", 0)
+                    try:
+                        q = api_get(e["url"], "/queue", timeout=6)
+                        for qt in q.get("queue_running", []):
+                            pid = qt[1]
+                            pct = None
+                            try:
+                                pp = api_get(e["url"], "/prompt_progress?prompt_id=" + pid, timeout=5)
+                                # ComfyUI 新版：{"nodes": {node_id: {"v": 当前步, "max": 总步}}}
+                                vals = [(float(d.get("v") or 0), float(d.get("max") or 0))
+                                       for d in (pp.get("nodes") or {}).values()
+                                       if isinstance(d, dict) and d.get("max")]
+                                if vals:
+                                    # 取进度最大的节点作为整体百分比（采样节点主导耗时）
+                                    pct = int(max(min(v / m, 1.0) for v, m in vals) * 100)
+                            except Exception:
+                                pass
+                            row["running"].append({"prompt_id": pid, "task": name_by_pid.get(pid, pid[:8]), "pct": pct})
+                    except Exception as ex:
+                        any_err = True
+                        row["error"] = str(ex)[:100]
+                items.append(row)
+            self._send(200, json.dumps({"items": items}, ensure_ascii=False))
             return
         if path.path == "/api/images":
             self._send(200, json.dumps({"images": list_images()}, ensure_ascii=False))
