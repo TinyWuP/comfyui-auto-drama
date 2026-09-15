@@ -1680,11 +1680,21 @@ def get_status(server, project=None):
     # 上一个项目提交的任务。指定 project 时只保留命名前缀匹配的任务
     # （含 _vN 历史版本）；daemon 等不传 project 的调用方保持旧行为。
     if project and str(project).strip():
-        st_proj = state.get("project") or {}
-        if str(st_proj.get("name") or "") == str(project).strip():
-            prefixes = _project_task_prefixes(st_proj)
+        pname = str(project).strip()
+        proj = None
+        projects = state.get("projects") or {}
+        if pname in projects:
+            proj = projects[pname]
         else:
-            prefixes = [str(project).strip()]
+            st_proj = state.get("project") or {}
+            if str(st_proj.get("name") or "") == pname:
+                proj = st_proj
+        if proj is not None:
+            prefixes = _project_task_prefixes(proj)
+            # 项目库快照没有剧本信息时兜底用项目名
+            prefixes = prefixes or [pname]
+        else:
+            prefixes = [pname]
         if prefixes:
             tasks = [t for t in tasks if _task_in_project(t, prefixes)]
     if not tasks:
