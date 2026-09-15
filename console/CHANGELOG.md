@@ -20,7 +20,9 @@
   - 新增 `_task_base_name`（剥 `_vN` 后缀）、`_project_task_prefixes`（项目名 + 各阶段
     剧本标题 + prompt_tasks 段名，标题去掉 AI 转换追加的 `_NN` 场次后缀）、
     `_task_in_project`（基础名/ID 前缀匹配，口径与项目列表 seg_done 统计一致）
-  - `/api/status` 读取 query 里的 `project` 透传给 `get_status`
+  - `/api/status` 读取 query 里的 `project` 透传给 `get_status`；过滤时按项目名先查
+    `projects` 库快照、再兜底当前 `project`（任务名常取剧本标题而非项目名，如
+    「麦田告别」项目的任务全叫「麦田十年_*」，只比对当前项目会误滤为空）
 - **修复（前端 `index.html`）**：`refreshStatus` 请求带上 `&project=<当前项目名>`；
   任务为空时顺手清 `statusTasksCache`，避免旧数据残留
 
