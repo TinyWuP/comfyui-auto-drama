@@ -1222,6 +1222,44 @@ function renderPromptCards() {
   </div>`).join('');
 }
 
+// 扩写过程中把后端已完成的段落回填到卡片。
+// 旧实现用 saved.length !== promptTasks.length 判断是否刷新——但扩写全程任务数
+// 恒定（如 10 段），该条件首轮之后永远为假，导致"每扩写完成一段就加载"失效。
+// 改为逐段比对：仅当某段后端提示词与当前卡片不同才更新那一段，避免整表重渲染
+// 打断用户正在编辑的其它段。
+async function pullExpandedTasks() {
+  try {
+    const pr = await fetch('/api/project', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({}),
+    });
+    const d = await pr.json();
+    const saved = (d.project && d.project.prompt_tasks) || [];
+    if (!saved.length) return;
+    // 卡片还没渲染（首次拉取/数量变化/从空到有）→ 整表渲染一次
+    if (promptTasks.length !== saved.length || !document.querySelector('#promptCards .pcard')) {
+      promptTasks = saved;
+      renderPromptCards();
+      renderProjects();
+      return;
+    }
+    // 增量：只回填内容真正变化的段落
+    let changed = 0;
+    saved.forEach((t, i) => {
+      const newP = String(t.prompt || '');
+      if (!newP || newP === String(promptTasks[i].prompt || '')) return;
+      const ta = document.querySelector(`#promptCards textarea.p-prompt[data-i="${i}"]`);
+      // 用户正在编辑这一段则跳过回填，避免打断输入
+      if (ta && document.activeElement === ta) return;
+      // 用户对该段有未提交的手动修改（DOM 与缓存不一致）→ 以用户编辑为准，不覆盖
+      if (ta && ta.value.trim() !== String(promptTasks[i].prompt || '').trim()) return;
+      promptTasks[i] = t;
+      if (ta) ta.value = newP;
+      changed++;
+    });
+    if (changed) renderProjects();
+  } catch (e) {}
+}
+
 function pollExpandTask(tid) {
   const btn = $('btnBuildPrompts');
   btn.disabled = true; btn.textContent = '✨ AI 扩写中…';
@@ -1250,18 +1288,7 @@ function pollExpandTask(tid) {
         $('promptProgressText').textContent = `第 ${done + 1}/${total} 段${pd.current ? ' · ' + pd.current : ''} · 已完成 ${done} 段${remain ? ' · ' + remain : ''}`;
         $('promptHint').textContent = `🤖 扩写中：${done}/${total} 段完成`;
         // 每段完成即保存，实时拉取渲染已完成段
-        try {
-          const pr2 = await fetch('/api/project', {
-            method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({}),
-          });
-          const d2 = await pr2.json();
-          const saved = (d2.project && d2.project.prompt_tasks) || [];
-          if (saved.length && saved.length !== promptTasks.length) {
-            promptTasks = saved;
-            renderPromptCards();
-            renderProjects();
-          }
-        } catch (e) {}
+        await pullExpandedTasks();
       } else {
         clearInterval(poll);
         toastClear();
