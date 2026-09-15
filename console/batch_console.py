@@ -2060,7 +2060,10 @@ def advance_chain(server, state):
     _dft = state.get("server") or DEFAULT_SERVER
     tasks = [t for t in all_tasks if _task_server_of(t, all_tasks, _dft) == server]
     changed = False
-    by_id = {t.get("id"): t for t in tasks}
+    # v0.13.32 跨实例续链支持：by_id 用全量任务——链头的前驱可能在别的实例
+    # （如整链迁移到新卡），前驱完成状态以本地 output_file/已下载为准，
+    # 末帧抽自本地共享目录，上传/提交才走本组 server。
+    by_id = {t.get("id"): t for t in all_tasks}
     # v0.13.25 自愈：等待中的链头（无 chain_prev 或前驱已不存在）没有任何人会提交它，
     # 直接补提交，解开"整链 waiting、ComfyUI 零请求"的死锁
     for t in tasks:
