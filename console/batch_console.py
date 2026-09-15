@@ -4515,7 +4515,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not r.get("server_ok"):
                         errs.append(f"{s['url']}：{r.get('error')}")
                         continue  # 该实例原始任务 dict 结构不同，不并入，只报连接错误
-                    merged.extend(r.get("tasks") or [])
+                    merged.extend(x for x in (r.get("tasks") or []) if isinstance(x, dict))
                 def _rank(x):
                     return {"running": 0, "queued": 1, "waiting": 2, "completed": 3, "error": 4}.get(x.get("status"), 5)
                 merged.sort(key=lambda x: str(x.get("submitted_at") or ""), reverse=True)
