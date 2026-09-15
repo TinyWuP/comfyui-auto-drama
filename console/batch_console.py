@@ -1345,8 +1345,8 @@ def extract_last_frame(video_path):
 
 def submit_tasks(server, tasks, auto_download=True, chain_mode=False, role_images=None, scene_image=None):
     warnings = []
-    # v0.13.32 多 GPU 实例：server 传 "auto"/空 = 自动分配到负载最轻的注册实例
-    if str(server or "").strip().lower() in ("", "auto") or str(server or "").strip() == "__AUTO__":
+    # v0.13.32 多 GPU 实例：server 传 "auto"/空/"all"（总览视图误提交）= 自动分配到负载最轻的注册实例
+    if str(server or "").strip().lower() in ("", "auto", "all", "*") or str(server or "").strip() == "__AUTO__":
         picked = _pick_server()
         if picked:
             server = picked
