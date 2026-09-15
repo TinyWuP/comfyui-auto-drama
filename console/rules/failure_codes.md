@@ -11,6 +11,9 @@
 | F-DUP-SUBMIT | 上一版还在远程生成/排队中，重提被拦截 | 流程 | 等它完成或删除旧记录后再提；已完成/失败/丢失可直接重提（自动接 v2/v3 序号） |
 | F-LOST | 任务在远程队列消失（被取消/重启） | 服务端 | 重新提交该任务 |
 | F-TIMEOUT | 生成超时疑似卡死 | 平台适配 | 换档位/降分辨率/拆段，不继续等 |
+| F-VRAM | 采样中显存不足（out of memory；常伴随此前某次崩溃把显存占死，日志里 H3 只"loaded partially 3GB 可用"且 110s/it 极慢） | 服务端显存 | 重启 ComfyUI 释放显存后重提该任务；期间别插入其它大模型工作流（如 Z-Image 生图） |
+| F-MEMSTATE | free_memory "list index out of range"（ComfyUI v0.35.0 核心内存管理 bug，崩溃后显存残留占死） | 服务端 | 重启 ComfyUI；随后失败的任务重提 |
+| F-EXEC | 节点执行异常（其它 exception_message） | 工作流/节点 | 看错误里的节点类型与消息，对照修复 |
 
 ## 资产/图片层
 

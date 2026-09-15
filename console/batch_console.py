@@ -1744,7 +1744,25 @@ def get_status(server, project=None):
                 item["status"] = "completed"
             elif st.get("status_str") == "error":
                 item["status"] = "error"
-                item["error"] = st.get("status_str")
+                # v0.13.31：透传真实错误（此前只写 status_str="error"，卡片与链式
+                # 判断都拿不到原因；且 t["error"] 不落库导致 advance_chain 把失败段
+                # 当成"还没结束"，整条链无限等待）。按错误内容归类失败码。
+                ee = msgs.get("execution_error") or {}
+                emsg = str(ee.get("exception_message") or "") or str(st.get("status_str"))
+                enode = str(ee.get("node_type") or "")
+                low = emsg.lower()
+                if "out of memory" in low or "would exceed allowed memory" in low:
+                    ecode = "F-VRAM"
+                elif "list index out of range" in low and "model_management" in str(ee.get("traceback", "")):
+                    ecode = "F-MEMSTATE"
+                else:
+                    ecode = "F-EXEC"
+                item["error"] = f"{enode}: {emsg[:200]}" if enode else emsg[:200]
+                item["failure_code"] = ecode
+                if not t.get("error"):
+                    t["error"] = item["error"]
+                    t["failure_code"] = ecode
+                    changed = True
             for nid, o in entry.get("outputs", {}).items():
                 for kind in ("images", "videos", "audio"):
                     for f in o.get(kind, []):
@@ -1905,10 +1923,14 @@ def advance_chain(server, state):
         if t.get("error"):
             t["chain_done"] = True
             t["chain_skipped"] = True
-            # 找更早的成功段末帧
+            # 找更早的成功段末帧（v0.13.31：限定同项目——只按任务名前缀匹配，
+            # 不然后续段会错误续接到上一个项目的末帧画面）
+            stem = re.sub(r"_\d+$", "", _task_base_name(nxt.get("name") or nxt.get("id") or ""))
             ref = None
             for j in range(i - 1, -1, -1):
                 prev = tasks[j]
+                if stem and not str(prev.get("name") or "").startswith(stem):
+                    continue
                 if prev.get("output_file") and os.path.exists(
                     os.path.join(OUTPUTS_DIR, prev["output_file"]["type"], prev["output_file"]["subfolder"], prev["output_file"]["filename"])
                 ):
