@@ -5,6 +5,46 @@
 
 ---
 
+## 2026-09-15 · v0.13.31 — 节点执行错误透传真实原因并落库，修复链路无限 waiting
+
+### 本次更新内容
+
+- **现象**：「最后两分钟」`_02` 在 ComfyUI 端 OOM 失败（`Allocation on device 0
+  would exceed allowed memory`），但控制台任务卡只显示裸字符串 `error`，且
+  `_03.._10` 共 8 个任务无限 `waiting`、链路死锁不推进
+- **根因 1（控制台）**：`get_status` 错误分支只写 `item["error"]`（来自
+  `status_str`，恒为 `"error"`），**没有持久化到 `t["error"]`**；
+  `advance_chain` 以 `t.get("error")` 判断段是否失败 → 看不到失败，把 `_02`
+  当"还在跑"，后续段全部卡 waiting
+- **根因 2（ComfyUI 侧，非控制台代码问题）**：OOM 崩溃泄漏显存，重启前后续
+  采样只有 ~3GB 可用、110s/it；另日志中 `free_memory` 的
+  `list index out of range`（ZImageTEModel_/Lumina2）来自独立的生图工作流，
+  是 ComfyUI v0.35.0 核心在动态模型卸载路径上的 bug，与 H3 视频图无关
+- **修复（后端）**：`get_status` 错误分支改从 `execution_error` 提取真实
+  `exception_message`/`node_type`，卡片显示 `节点类型: 错误摘要`；按内容归类
+  `F-VRAM`（显存不足）/ `F-MEMSTATE`（free_memory IndexError）/ `F-EXEC`
+  （其他节点异常），并**回写 `t["error"]` + `t["failure_code"]` 持久化**，
+  `advance_chain` 可正常感知失败、触发降级跳过
+- **修复（后端）**：失败跳过向前找参考帧时限定同项目前缀（按任务名去掉段号
+  后的 stem 匹配），防止跨项目误取上一项目尾帧续写
+- **规则**：`rules/failure_codes.md` 提交/运行层表新增 F-VRAM、F-MEMSTATE、
+  F-EXEC 三条目及处置建议（F-VRAM 优先怀疑崩溃泄漏显存，重启 ComfyUI 后重跑）
+
+### 影响
+
+- 任务失败时卡片直接显示可诊断的真实错误（含节点类型），不再只有 "error"
+- OOM 等失败不再导致链路无限 waiting，守护可自动降级续链
+- 事故恢复实操：清队列 → 重启 ComfyUI（显存归零）→ `_03` 重置为 r2v 孤立
+  链头 → 守护链头自愈重新提交，正常加载 22495MB 显存恢复生成
+
+### 验证方式
+
+- `py_compile` 通过；部署重启双守护后，`_02` 状态带真实错误文本与
+  `failure_code=F-VRAM`，`_03` 经链头自愈提交为 running、`_04.._10` waiting，
+  ComfyUI 日志确认模型全量加载（22495.36 MB usable）、采样正常推进
+
+---
+
 ## 2026-09-15 · v0.13.30 — 合成历史按项目过滤
 
 ### 本次更新内容
