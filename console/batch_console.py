@@ -4373,12 +4373,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"segments": segs}, ensure_ascii=False))
             return
         if path.path == "/api/assemble_history":
-            """已合成视频历史（素材目录下 合成_*.mp4，按时间倒序）。"""
+            """已合成视频历史（素材目录下 合成_*.mp4，按时间倒序）。
+            v0.13.30：带 project 参数时只显示该项目的合成文件
+            （文件名规律 合成_<项目slug>_…，与任务过滤同思路）。"""
+            qs = urllib.parse.parse_qs(path.query)
+            proj_filter = (qs.get("project") or [""])[0].strip()
+            slug_prefix = f"合成_{_slug(proj_filter)}_" if proj_filter else ""
             files = []
             for d in IMAGE_DIRS:
                 if not os.path.isdir(d):
                     continue
                 for fn in os.listdir(d):
+                    if proj_filter and not fn.startswith(slug_prefix):
+                        continue
                     if fn.startswith("合成_") and fn.lower().endswith(".mp4"):
                         p = os.path.join(d, fn)
                         try:

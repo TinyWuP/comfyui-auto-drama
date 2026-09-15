@@ -889,6 +889,9 @@ async function openProject(name) {
   currentProjectName = d.project.name || name;
   await loadProject();
   await renderProjects();
+  assembleVersionsCache = null;   // 版本候选按项目取，切项目后重拉
+  refreshStatus();
+  loadAssembleHistory();
   toast(`已打开项目：${d.project.name || name}`);
   return true;
 }
@@ -1755,10 +1758,12 @@ async function loadAssembleHistory() {
   const box = $('assembleHistory');
   if (!box) return;
   try {
-    const r = await fetch('/api/assemble_history');
+    const r = await fetch(`/api/assemble_history?project=${encodeURIComponent(currentProjectName || '')}`);
     const d = await r.json();
     const files = d.history || [];
     histCache = files;
+    histSelected = {};
+    if (histPage * histPageSize >= files.length) histPage = 0;
     renderAssembleHistory();
   } catch (e) { box.innerHTML = '<div class="hint">历史加载失败</div>'; }
 }
