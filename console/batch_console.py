@@ -4522,7 +4522,7 @@ class Handler(BaseHTTPRequestHandler):
                             else:
                                 errs.append(f"{s['url']} 返回非任务项：{type(x).__name__}")
                     def _rank(x):
-                        return {"running": 0, "queued": 1, "waiting": 2, "completed": 3, "error": 4}.get(x.get("status"), 5)
+                        return {"running": 0, "queued": 1, "waiting": 2, "completed": 3, "error": 4}.get(x, 5)
                     merged.sort(key=lambda x: str(x.get("submitted_at") or ""), reverse=True)
                     merged.sort(key=lambda x: _rank(x.get("status")))
                     self._send(200, json.dumps({
