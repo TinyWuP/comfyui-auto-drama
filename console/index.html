@@ -2970,9 +2970,8 @@ $('promptCards').addEventListener('input', e => {
 
 renderSteps();
 loadImages();
-loadProject();
+loadProject().then(() => loadAssembleHistory());  // 合成历史依赖当前项目名，必须等项目加载完
 renderProjects();
-loadAssembleHistory();
 checkConn();
 checkLlm();
 loadConfigIntoForm();
