@@ -2090,12 +2090,14 @@ def advance_chain(server, state):
         if t.get("error"):
             t["chain_done"] = True
             t["chain_skipped"] = True
-            # 找更早的成功段末帧（v0.13.31：限定同项目——只按任务名前缀匹配，
-            # 不然后续段会错误续接到上一个项目的末帧画面）
+            # 找更早的成功段末帧（v0.13.31：限定同项目——只按任务名前缀匹配；
+            # v0.13.32：改用全量任务列表搜索——前驱可能归属另一实例，
+            # 末帧视频在本地共享目录，抽帧后上传到本组 server 即可跨实例续链）
             stem = re.sub(r"_\d+$", "", _task_base_name(nxt.get("name") or nxt.get("id") or ""))
             ref = None
-            for j in range(i - 1, -1, -1):
-                prev = tasks[j]
+            my_idx = all_tasks.index(nxt) if nxt in all_tasks else -1
+            for j in range(my_idx - 1, -1, -1):
+                prev = all_tasks[j]
                 if stem and not str(prev.get("name") or "").startswith(stem):
                     continue
                 if prev.get("output_file") and os.path.exists(
