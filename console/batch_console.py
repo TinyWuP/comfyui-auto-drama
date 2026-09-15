@@ -1639,9 +1639,54 @@ def prompt_fingerprint(prompt):
     return hashlib.sha1(p.encode("utf-8")).hexdigest()[:12]
 
 
-def get_status(server):
+def _task_base_name(name):
+    """剥掉 _vN 版本后缀，得到基础任务名（麦田十年_01_v6 → 麦田十年_01）。"""
+    return re.sub(r"_v\d+$", "", str(name or ""))
+
+
+def _project_task_prefixes(proj):
+    """项目任务的命名前缀集合：项目名 + 各阶段剧本标题（提交时任务名取自分镜卡，
+    常为剧本标题而非项目名）。"""
+    prefixes = []
+    pname = str((proj or {}).get("name") or "").strip()
+    if pname:
+        prefixes.append(pname)
+    for k in ("prompt_tasks", "current_script", "script_before", "script_after"):
+        v = (proj or {}).get(k)
+        if k == "prompt_tasks":
+            t = next((str(s.get("name") or "") for s in (v or [])
+                      if isinstance(s, dict) and s.get("name")), "")
+        elif isinstance(v, dict):
+            t = str(v.get("title") or "")
+        else:
+            t = ""
+        t = _task_base_name(t)  # AI 转换会给标题追加 _NN 场次后缀，任务名里没有
+        if t and t not in prefixes:
+            prefixes.append(t)
+    return prefixes
+
+
+def _task_in_project(t, prefixes):
+    """任务（基础名）是否属于本项目：与项目列表统计 seg_done 的口径一致。"""
+    n = _task_base_name(t.get("name") or t.get("id"))
+    idn = _task_base_name(t.get("id"))
+    return any(n.startswith(p) or idn.startswith(p) for p in prefixes)
+
+
+def get_status(server, project=None):
     state = load_state()
     tasks = state.get("tasks", [])
+    # v0.13.29 按项目过滤：state["tasks"] 是全局池，不过滤会让新建项目看到
+    # 上一个项目提交的任务。指定 project 时只保留命名前缀匹配的任务
+    # （含 _vN 历史版本）；daemon 等不传 project 的调用方保持旧行为。
+    if project and str(project).strip():
+        st_proj = state.get("project") or {}
+        if str(st_proj.get("name") or "") == str(project).strip():
+            prefixes = _project_task_prefixes(st_proj)
+        else:
+            prefixes = [str(project).strip()]
+        if prefixes:
+            tasks = [t for t in tasks if _task_in_project(t, prefixes)]
     if not tasks:
         return {"server_ok": True, "tasks": []}
     try:
@@ -4258,7 +4303,8 @@ class Handler(BaseHTTPRequestHandler):
         if path.path == "/api/status":
             qs = urllib.parse.parse_qs(path.query)
             server = qs.get("server", [DEFAULT_SERVER])[0]
-            self._send(200, json.dumps(get_status(server), ensure_ascii=False))
+            proj = qs.get("project", [""])[0]
+            self._send(200, json.dumps(get_status(server, proj), ensure_ascii=False))
             return
         if path.path == "/api/images":
             self._send(200, json.dumps({"images": list_images()}, ensure_ascii=False))

@@ -1486,10 +1486,10 @@ function fmtDur(sec) { if (sec == null) return '—'; return `${Math.floor(sec/6
 async function refreshStatus() {
   const server = $('serverInput').value.trim();
   try {
-    const r = await fetch(`/api/status?server=${encodeURIComponent(server)}`);
+    const r = await fetch(`/api/status?server=${encodeURIComponent(server)}&project=${encodeURIComponent(currentProjectName || '')}`);
     const d = await r.json();
     if (!d.server_ok) { $('statusCards').innerHTML = '<div class="empty">⚠️ 服务器连接异常</div>'; return; }
-    if (!d.tasks.length) { $('statusCards').innerHTML = '<div class="empty"><div class="big">🎬</div>还没有任务，提交后这里显示状态</div>'; return; }
+    if (!d.tasks.length) { statusTasksCache = []; $('statusCards').innerHTML = '<div class="empty"><div class="big">🎬</div>还没有任务，提交后这里显示状态</div>'; return; }
     statusTasksCache = d.tasks;
     renderStatusCards();
   } catch (e) { $('statusCards').innerHTML = '<div class="empty">状态刷新失败</div>'; }
