@@ -51,6 +51,7 @@ RULES_DIR = os.path.join(BASE_DIR, "rules")
 _CONFIG_DEFAULTS = {
     "comfyui": {
         "server": "http://127.0.0.1:8188",
+        "servers": [],
         "workflow_dir": "workflows",
         "auth": {
             "enabled": False,
@@ -134,6 +135,124 @@ DEFAULT_SERVER = _CONFIG["comfyui"]["server"]
 DEFAULT_WORKFLOW_DIR = _abs_path(_CONFIG["comfyui"]["workflow_dir"])
 OUTPUTS_DIR = _abs_path(_CONFIG["storage"]["output_dir"])
 IMAGE_DIRS = [_abs_path(d) for d in _CONFIG["storage"]["asset_dirs"]]
+
+
+# ---------- v0.13.32 多 GPU 实例（每实例 = 一张卡上的独立 ComfyUI） ----------
+
+def _server_list():
+    """已注册的 ComfyUI 实例列表（保持配置顺序）。
+    每项 {"url","name","gpu"}；comfyui.server（默认实例）若不在列表中则置顶，
+    兼容单实例旧配置。读取 _CONFIG 而非常量，/api/config 保存后立即生效。"""
+    raw = (_CONFIG.get("comfyui") or {}).get("servers") or []
+    out, seen = [], set()
+    for item in raw:
+        if isinstance(item, str):
+            item = {"url": item}
+        url = str(item.get("url") or "").strip().rstrip("/")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        out.append({
+            "url": url,
+            "name": str(item.get("name") or url),
+            "gpu": str(item.get("gpu") or ""),
+        })
+    dft = str(DEFAULT_SERVER or "").strip().rstrip("/")
+    if dft and dft not in seen:
+        out.insert(0, {"url": dft, "name": f"{dft}（默认）", "gpu": ""})
+    return out
+
+
+_SERVERS_STATS_CACHE = {"t": 0.0, "data": {}}
+
+
+def _servers_with_stats(refresh=False):
+    """实例列表 + 实时负载（队列长度、空闲显存）。8 秒缓存，前端轮询不打爆 ComfyUI。
+    vram 来自 /system_stats devices[]（实例经 CUDA_VISIBLE_DEVICES 只见自己的卡）。"""
+    now = time.time()
+    if not refresh and now - _SERVERS_STATS_CACHE["t"] < 8:
+        data = _SERVERS_STATS_CACHE["data"]
+        if data:
+            return data
+    out = []
+    for s in _server_list():
+        e = dict(s)
+        e.update({"ok": False, "running": 0, "pending": 0,
+                  "vram_total_mb": None, "vram_free_mb": None, "error": None})
+        try:
+            stats = api_get(s["url"], "/system_stats", timeout=6)
+            devs = stats.get("devices") or [{}]
+            total = sum(float(d.get("vram_total") or 0) for d in devs)
+            free = sum(float(d.get("vram_free") or 0) for d in devs)
+            e["vram_total_mb"] = round(total / 1048576)
+            e["vram_free_mb"] = round(free / 1048576)
+            e["name"] = e["name"] or s["url"]
+            # 名字里没写卡号时，从 devices type 补一个可读标识
+            dtype = str(devs[0].get("type") or "")
+            if not e["gpu"] and dtype:
+                e["gpu"] = dtype.split(" ")[0]
+            q = api_get(s["url"], "/queue", timeout=6)
+            e["running"] = len(q.get("queue_running", []))
+            e["pending"] = len(q.get("queue_pending", []))
+            e["ok"] = True
+        except Exception as ex:
+            e["error"] = str(ex)[:120]
+        out.append(e)
+    _SERVERS_STATS_CACHE["t"] = now
+    _SERVERS_STATS_CACHE["data"] = out
+    return out
+
+
+def _pick_server():
+    """自动分配：从注册实例中选负载最轻的（先比排队+运行数，再比空闲显存）。
+    全部不可达时返回 None（调用方回退 DEFAULT_SERVER）。"""
+    best, best_key = None, None
+    for e in _servers_with_stats():
+        if not e["ok"]:
+            continue
+        key = (e["running"] + e["pending"], -(e["vram_free_mb"] or 0))
+        if best_key is None or key < best_key:
+            best, best_key = e["url"], key
+    return best
+
+
+_SERVER_SUFFIX_RE = re.compile(r":(\d+)$")
+
+
+def _server_matches(srv, suffix):
+    """URL 末端口与 /history 里 prompt 的 ComfyUI_server 字段（如 ':8189'）是否一致；
+    两边都取不到端口时按相等处理（兼容同机默认实例与旧数据）。"""
+    a = _SERVER_SUFFIX_RE.search(str(srv or ""))
+    b = _SERVER_SUFFIX_RE.search(str(suffix or ""))
+    if not a or not b:
+        return True
+    return a.group(1) == b.group(1)
+
+
+def _migrate_tasks_servers(state):
+    """v0.13.32 一次性迁移：任务没有 server 字段时，尽量用 /history 的真实落点回填
+    （ComfyUI history 的 prompt 里带 ComfyUI_server 即监听端口后缀），查不到则归到默认实例。
+    避免旧任务被错误地"归到"别的实例导致状态查询丢失。返回是否有改动。"""
+    tasks = state.get("tasks") or []
+    need = [t for t in tasks if t.get("prompt_id") and not t.get("server")]
+    if not need:
+        return False
+    mapping = {}
+    for srv in [s["url"] for s in _server_list()]:
+        try:
+            hist = api_get(srv, "/history?max_items=300", timeout=10)
+            for pid, entry in (hist or {}).items():
+                cs = ((entry or {}).get("prompt") or [None, None, None, {}])[3].get("ComfyUI_server")
+                if cs is not None and _server_matches(srv, cs):
+                    mapping[pid] = srv
+        except Exception:
+            continue
+    changed = False
+    for t in need:
+        srv = mapping.get(t.get("prompt_id")) or state.get("server") or DEFAULT_SERVER
+        t["server"] = srv
+        changed = True
+    return changed
 
 
 def _ensure_storage_dirs():
@@ -1226,6 +1345,12 @@ def extract_last_frame(video_path):
 
 def submit_tasks(server, tasks, auto_download=True, chain_mode=False, role_images=None, scene_image=None):
     warnings = []
+    # v0.13.32 多 GPU 实例：server 传 "auto"/空 = 自动分配到负载最轻的注册实例
+    if str(server or "").strip().lower() in ("", "auto") or str(server or "").strip() == "__AUTO__":
+        picked = _pick_server()
+        if picked:
+            server = picked
+    server = str(server or DEFAULT_SERVER).rstrip("/")
     # R2V 任务：三段式 → 官方六段式（仅本次会直接提交的段；链式等待段保持三段式，
     # 后续由 advance_chain 转 I2V 使用）
     for idx, t in enumerate(tasks):
@@ -1410,6 +1535,7 @@ def submit_tasks(server, tasks, auto_download=True, chain_mode=False, role_image
             "ref_video": task.get("ref_video"),
             "prompt": task.get("prompt", ""),
             "prompt_id": pid,
+            "server": server,  # v0.13.32 任务归属实例（链式续接/状态查询按此路由）
             "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "downloaded": False,
             "recorded": False,
@@ -1673,9 +1799,39 @@ def _task_in_project(t, prefixes):
     return any(n.startswith(p) or idn.startswith(p) for p in prefixes)
 
 
+def _task_server_of(t, tasks=None, default=""):
+    """任务归属实例（v0.13.32 多 GPU）：
+    - 已提交的：提交时写入的 t["server"]
+    - 链式等待的：沿 chain_prev 上溯找第一个有 server 的前驱（同链同实例，
+      跨实例会拿不到链帧）；找不到则归默认实例。确定性归属，避免 daemon
+      两个分组同时看到同一 waiting 任务导致重复提交。"""
+    srv = str(t.get("server") or "").strip().rstrip("/")
+    if srv:
+        return srv
+    if t.get("chain_waiting") and tasks:
+        by_id = {x.get("id"): x for x in tasks}
+        ref, hops, cur = t.get("chain_prev"), 0, t
+        while ref and hops < 50:
+            prev = by_id.get(ref)
+            if prev is None:
+                break
+            psrv = str(prev.get("server") or "").strip().rstrip("/")
+            if psrv:
+                return psrv
+            if not prev.get("chain_waiting"):
+                break
+            ref, hops, cur = prev.get("chain_prev"), hops + 1, prev
+    return str(default or "").strip().rstrip("/") or DEFAULT_SERVER
+
+
 def get_status(server, project=None):
+    server = str(server or DEFAULT_SERVER).strip().rstrip("/")
     state = load_state()
     tasks = state.get("tasks", [])
+    # v0.13.32 多实例路由：只处理归属本 server 的任务（等待任务沿链上溯归属）。
+    # 旧数据无 server 字段 → 归 state["server"]（单实例时代全部兼容）。
+    _dft = state.get("server") or DEFAULT_SERVER
+    tasks = [t for t in tasks if _task_server_of(t, state.get("tasks"), _dft) == server]
     # v0.13.29 按项目过滤：state["tasks"] 是全局池，不过滤会让新建项目看到
     # 上一个项目提交的任务。指定 project 时只保留命名前缀匹配的任务
     # （含 _vN 历史版本）；daemon 等不传 project 的调用方保持旧行为。
@@ -1718,6 +1874,7 @@ def get_status(server, project=None):
                 "error": None, "downloaded": False,
                 "submitted_at": t.get("submitted_at", ""),
                 "failure_code": t.get("failure_code"),
+                "server": server,
             })
             continue
         item = {
@@ -1727,6 +1884,7 @@ def get_status(server, project=None):
             "error": None, "downloaded": t.get("downloaded", False),
             "submitted_at": t.get("submitted_at", ""),
             "failure_code": t.get("failure_code"),
+            "server": server,
         }
         if pid in pending_ids:
             item["status"] = "queued"
@@ -1882,6 +2040,7 @@ def _submit_waiting_head(server, t):
             print(f"[chain] 链头自愈提交异常：{resp}")
             return False
         t["prompt_id"] = pid
+        t["server"] = server  # v0.13.32 自愈提交后固化归属实例
         t["mode"] = mode
         t["chain_waiting"] = False
         t["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1893,8 +2052,13 @@ def _submit_waiting_head(server, t):
 
 
 def advance_chain(server, state):
-    """链式衔接：上一段完成并下载后，抽最后一帧上传，提交下一段。"""
-    tasks = state.get("tasks", [])
+    """链式衔接：上一段完成并下载后，抽最后一帧上传，提交下一段。
+    v0.13.32 多实例：只推进归属本 server 的任务（链内同实例），
+    其他实例的任务由其所属分组各自推进，避免重复提交/跨实例取不到链帧。"""
+    server = str(server or DEFAULT_SERVER).strip().rstrip("/")
+    all_tasks = state.get("tasks", [])
+    _dft = state.get("server") or DEFAULT_SERVER
+    tasks = [t for t in all_tasks if _task_server_of(t, all_tasks, _dft) == server]
     changed = False
     by_id = {t.get("id"): t for t in tasks}
     # v0.13.25 自愈：等待中的链头（无 chain_prev 或前驱已不存在）没有任何人会提交它，
@@ -1960,6 +2124,7 @@ def advance_chain(server, state):
                         pid = resp.get("prompt_id") if resp else None
                         if pid:
                             nxt["prompt_id"] = pid
+                            nxt["server"] = server
                             nxt["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                             nxt["chain_waiting"] = False
                             nxt["image"] = chain_img
@@ -1984,6 +2149,7 @@ def advance_chain(server, state):
                 pid = resp.get("prompt_id") if resp else None
                 if pid:
                     nxt["prompt_id"] = pid
+                    nxt["server"] = server
                     nxt["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                     nxt["chain_waiting"] = False
                     nxt["mode"] = "t2v"
@@ -2090,6 +2256,7 @@ def advance_chain(server, state):
             print(f"[chain] 下一段提交异常：{resp}")
             continue
         nxt["prompt_id"] = pid
+        nxt["server"] = server
         nxt["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         nxt["chain_waiting"] = False
         nxt["image"] = chain_img
@@ -4336,7 +4503,35 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(path.query)
             server = qs.get("server", [DEFAULT_SERVER])[0]
             proj = qs.get("project", [""])[0]
+            if str(server).strip().lower() in ("all", "*"):
+                # v0.13.32 多实例总览：逐个注册实例查询并合并（链任务按归属实例路由）
+                servers = _server_list()
+                merged, errs = [], []
+                for s in servers:
+                    r = get_status(s["url"], proj)
+                    if not r.get("server_ok"):
+                        errs.append(f"{s['url']}：{r.get('error')}")
+                        continue  # 该实例原始任务 dict 结构不同，不并入，只报连接错误
+                    merged.extend(r.get("tasks") or [])
+                def _rank(x):
+                    return {"running": 0, "queued": 1, "waiting": 2, "completed": 3, "error": 4}.get(x.get("status"), 5)
+                merged.sort(key=lambda x: str(x.get("submitted_at") or ""), reverse=True)
+                merged.sort(key=lambda x: _rank(x.get("status")))
+                self._send(200, json.dumps({
+                    "server_ok": len(errs) < len(servers), "tasks": merged,
+                    "error": "；".join(errs) if errs else None,
+                }, ensure_ascii=False))
+                return
             self._send(200, json.dumps(get_status(server, proj), ensure_ascii=False))
+            return
+        if path.path == "/api/servers":
+            # v0.13.32 多 GPU 实例：返回注册实例列表 + 实时负载（8 秒缓存）
+            qs = urllib.parse.parse_qs(path.query)
+            refresh = qs.get("refresh", ["0"])[0] in ("1", "true", "yes")
+            self._send(200, json.dumps({
+                "servers": _servers_with_stats(refresh=refresh),
+                "default": DEFAULT_SERVER,
+            }, ensure_ascii=False))
             return
         if path.path == "/api/images":
             self._send(200, json.dumps({"images": list_images()}, ensure_ascii=False))
@@ -5213,7 +5408,7 @@ class Handler(BaseHTTPRequestHandler):
             pid = t.get("prompt_id")
             if pid:
                 try:
-                    q = api_get(str(st.get("server") or DEFAULT_SERVER), "/queue")
+                    q = api_get(str(t.get("server") or st.get("server") or DEFAULT_SERVER), "/queue")
                     active = {x[1] for x in q.get("queue_running", [])} | {x[1] for x in q.get("queue_pending", [])}
                     if pid in active:
                         self._send(400, json.dumps({"error": "任务正在生成/排队中，不能删除"}, ensure_ascii=False))
@@ -5305,7 +5500,8 @@ class Handler(BaseHTTPRequestHandler):
                         projects2[proj2["name"]] = dict(proj2)
                         st2["projects"] = projects2
                     save_state(st2)
-            server = st.get("server") or DEFAULT_SERVER
+            # v0.13.32：重生成默认沿用原任务归属实例；body 可显式指定 server/auto
+            server = str(body.get("server") or "").strip() or t.get("server") or st.get("server") or DEFAULT_SERVER
             results, err = submit_tasks(
                 server, [new_task], auto_download=True,
                 chain_mode=bool(body.get("chain_mode")),

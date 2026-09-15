@@ -446,6 +446,10 @@
           </select>
         </label>
         <button class="btn" id="btnApplyMp">一键应用到全部段</button>
+        <label style="font-size:13px" title="选择提交到哪个 ComfyUI 实例（每个实例对应一张显卡）；自动=分配给当前负载最轻的实例">GPU 资源
+          <select id="gpuSelect" style="width:200px"></select>
+        </label>
+        <button class="btn" id="btnRefreshServers" title="刷新实例负载" style="padding:4px 8px">↻</button>
         <span style="flex:1"></span>
         <button class="btn primary" id="btnSubmit">🚀 提交任务</button>
         <button class="btn" id="btnRefreshStatus">刷新</button>
@@ -1437,7 +1441,7 @@ async function submit() {
     const r = await fetch('/api/submit', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
-        server: $('serverInput').value.trim(), tasks,
+        server: $('gpuSelect').value || 'auto', tasks,
         auto_download: $('autoDownload').checked,
         chain_mode: $('chainMode').checked,
         role_images: [$('roleImage1').value, $('roleImage2').value].filter(Boolean),
@@ -1486,18 +1490,39 @@ function pill(status) {
 }
 function fmtDur(sec) { if (sec == null) return '—'; return `${Math.floor(sec/60)}分${String(sec%60).padStart(2,'0')}秒`; }
 
+let gpuServerList = [];  // v0.13.32 注册的 ComfyUI 实例（每项含负载）
+function _gpuOptLabel(s) {
+  const port = (s.url.match(/:(\d+)$/) || [])[1] || s.url;
+  const base = s.name && s.name !== s.url ? s.name : `实例:${port}`;
+  if (!s.ok) return `${base} ⚠️离线`;
+  const free = s.vram_free_mb != null ? `余${(s.vram_free_mb / 1024).toFixed(0)}G` : '';
+  const load = `运行${s.running}/排队${s.pending}`;
+  return `${base}（${[free, load].filter(Boolean).join(' ')}）`;
+}
+async function loadServers() {
+  const cur = ($('gpuSelect') || {}).value || 'auto';
+  try {
+    const d = await (await fetch('/api/servers')).json();
+    gpuServerList = d.servers || [];
+    const sel = $('gpuSelect');
+    const opts = ['<option value="auto">🤖 自动分配（负载最轻）</option>', '<option value="all">🌐 全部实例（总览）</option>'];
+    gpuServerList.forEach(s => opts.push(`<option value="${escAttr(s.url)}">${esc(_gpuOptLabel(s))}</option>`));
+    sel.innerHTML = opts.join('');
+    if (gpuServerList.some(s => s.url === cur) || cur === 'auto' || cur === 'all') sel.value = cur;
+  } catch (e) { /* 选择器保留上次内容 */ }
+}
+
 async function refreshStatus() {
-  const server = $('serverInput').value.trim();
+  const server = $('gpuSelect') && $('gpuSelect').value ? $('gpuSelect').value : $('serverInput').value.trim();
   try {
     const r = await fetch(`/api/status?server=${encodeURIComponent(server)}&project=${encodeURIComponent(currentProjectName || '')}`);
     const d = await r.json();
-    if (!d.server_ok) { $('statusCards').innerHTML = '<div class="empty">⚠️ 服务器连接异常</div>'; return; }
+    if (!d.server_ok) { $('statusCards').innerHTML = `<div class="empty">⚠️ 服务器连接异常${d.error ? '：' + esc(String(d.error).slice(0, 120)) : ''}</div>`; return; }
     if (!d.tasks.length) { statusTasksCache = []; $('statusCards').innerHTML = '<div class="empty"><div class="big">🎬</div>还没有任务，提交后这里显示状态</div>'; return; }
     statusTasksCache = d.tasks;
     renderStatusCards();
   } catch (e) { $('statusCards').innerHTML = '<div class="empty">状态刷新失败</div>'; }
 }
-
 function renderStatusCards() {
   const tasks = latestOnlyMode ? visibleTasks(statusTasksCache) : statusTasksCache;
   if (!tasks.length) return;
@@ -1531,7 +1556,9 @@ function renderStatusCards() {
       const regen = t.status === 'completed'
         ? `<button class="btn" style="padding:3px 8px;font-size:11px;color:var(--blue)" onclick="regenerateVideo('${escAttr(t.id)}')">🔄 重新生成</button>`
         : '';
-      return `<div class="card-item${active ? ' generating' : ''}"><div class="r1"><span class="name">${esc(t.name)}</span><span style="display:flex;align-items:center;gap:7px">${spin}${pill(t.status)}</span></div>
+      const srvTag = (t.server && gpuServerList.length > 1)
+        ? `<span class="pill" title="${esc(t.server)}" style="font-size:10px;background:rgba(120,120,255,.14);border:1px solid rgba(120,120,255,.4)">:${(t.server.match(/:(\d+)$/) || [])[1] || '?'}</span>` : '';
+      return `<div class="card-item${active ? ' generating' : ''}"><div class="r1"><span class="name">${esc(t.name)}</span><span style="display:flex;align-items:center;gap:7px">${srvTag}${spin}${pill(t.status)}</span></div>
         <div class="meta">${t.mode.toUpperCase()} · ${t.duration}s · ${t.mp}MP · ${fmtDur(t.elapsed_sec)}</div>${outs}${err}
         <div class="row" style="margin-top:8px">${regen}${del}</div></div>`;
     }).join('')}</div>`
@@ -2910,6 +2937,9 @@ $('btnBuildPrompts').addEventListener('click', buildPrompts);
 $('btnSubmit').addEventListener('click', submit);
 $('latestOnly').checked = latestOnlyMode;
 $('btnRefreshStatus').addEventListener('click', refreshStatus);
+$('gpuSelect').addEventListener('change', () => { refreshStatus(); });
+$('btnRefreshServers').addEventListener('click', loadServers);
+loadServers();  // v0.13.32 初始化 GPU 实例选择器
 $('btnApplyMp').addEventListener('click', applyMpAll);
 $('btnAssemble').addEventListener('click', assemble);
 $('btnPickVersions').addEventListener('click', loadAssembleVersions);

@@ -1,6 +1,10 @@
 {
   "comfyui": {
     "server": "http://127.0.0.1:8188",
+    "servers": [
+      { "url": "http://127.0.0.1:8188", "name": "GPU0 · 卡1", "gpu": "cuda:0" },
+      { "url": "http://127.0.0.1:8189", "name": "GPU1 · 卡2", "gpu": "cuda:1" }
+    ],
     "workflow_dir": "workflows",
     "auth": {
       "enabled": false,
