@@ -1472,7 +1472,11 @@ function renderStatusCards() {
   if (statusPage * statusPageSize >= tasks.length) statusPage = 0;
   const pages = Math.ceil(tasks.length / statusPageSize);
   const show = tasks.slice(statusPage * statusPageSize, (statusPage + 1) * statusPageSize);
-  $('statusCards').innerHTML = `<div class="cards">${show.map(t => {
+  const hiddenN = statusTasksCache.length - tasks.length;
+  const filterBar = latestOnlyMode
+    ? `<div class="hint" style="margin:2px 0 8px">👁️ 仅显示每段最新版本${hiddenN > 0 ? `：已隐藏 ${hiddenN} 个旧版本（共 ${statusTasksCache.length} 条任务 / ${tasks.length} 段）` : ''}</div>`
+    : '';
+  $('statusCards').innerHTML = filterBar + `<div class="cards">${show.map(t => {
       const active = ['running', 'queued', 'waiting'].includes(t.status);
       const spin = active ? '<span class="spin"></span>' : '';
       const outs = (t.outputs || []).map(o => {
@@ -1501,7 +1505,7 @@ function renderStatusCards() {
     }).join('')}</div>`
     + (pages > 1 ? `<div class="row" style="margin-top:10px;justify-content:center;gap:12px;align-items:center">
         <button class="btn" ${statusPage === 0 ? 'disabled' : ''} onclick="statusPage>0&&(statusPage--,renderStatusCards())">← 上一页</button>
-        <span class="hint">第 ${statusPage * statusPageSize + 1}-${Math.min((statusPage + 1) * statusPageSize, tasks.length)} / ${tasks.length} 个任务${latestOnlyMode && statusTasksCache.length > tasks.length ? `（已隐藏 ${statusTasksCache.length - tasks.length} 个旧版本）` : ''}</span>
+        <span class="hint">第 ${statusPage * statusPageSize + 1}-${Math.min((statusPage + 1) * statusPageSize, tasks.length)} / ${tasks.length} 个任务</span>
         <button class="btn" ${statusPage >= pages - 1 ? 'disabled' : ''} onclick="statusPage<${pages - 1}&&(statusPage++,renderStatusCards())">下一页 →</button>
       </div>` : '');
 }
