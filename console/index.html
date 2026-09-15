@@ -449,6 +449,9 @@
         <span style="flex:1"></span>
         <button class="btn primary" id="btnSubmit">🚀 提交任务</button>
         <button class="btn" id="btnRefreshStatus">刷新</button>
+        <label style="font-size:13px;white-space:nowrap" title="同一段的多个重生成版本（_vN）只显示最新的；进行中的任务始终显示">
+          <input type="checkbox" id="latestOnly" onchange="setLatestOnly(this.checked)"> 仅显示每段最新版本
+        </label>
       </div>
       <div id="statusCards"><div class="empty"><div class="big">🎬</div>提交后这里实时显示每段状态</div></div>
       <div class="card" style="margin-top:18px;box-shadow:none;background:#f8fafc">
@@ -1424,6 +1427,27 @@ async function submit() {
 let statusTasksCache = [];
 let statusPage = 0;
 const statusPageSize = 12;
+// 仅显示每段最新版本：同一段的多个重生成版本（_vN）只留最新版，进行中的任务始终显示
+let latestOnlyMode = localStorage.getItem('latestOnly') === '1';
+function setLatestOnly(on) {
+  latestOnlyMode = !!on;
+  localStorage.setItem('latestOnly', on ? '1' : '0');
+  statusPage = 0;
+  renderStatusCards();
+}
+function visibleTasks(list) {
+  const keyOf = t => String(t.name || t.id || '').replace(/_v\d+$/, '');
+  const verOf = t => { const m = /_v(\d+)$/.exec(String(t.name || t.id || '')); return m ? parseInt(m[1], 10) : 1; };
+  const maxVer = {};
+  list.forEach(t => {
+    const k = keyOf(t), v = verOf(t);
+    if (!(k in maxVer) || v > maxVer[k]) maxVer[k] = v;
+  });
+  return list.filter(t => {
+    if (verOf(t) === maxVer[keyOf(t)]) return true;
+    return ['running', 'queued', 'waiting'].includes(t.status);
+  });
+}
 function pill(status) {
   const map = {queued: '排队中', running: '生成中', completed: '已完成', error: '失败', waiting: '等待上段'};
   return `<span class="pill ${status}">${map[status] || status}</span>`;
@@ -1443,7 +1467,7 @@ async function refreshStatus() {
 }
 
 function renderStatusCards() {
-  const tasks = statusTasksCache;
+  const tasks = latestOnlyMode ? visibleTasks(statusTasksCache) : statusTasksCache;
   if (!tasks.length) return;
   if (statusPage * statusPageSize >= tasks.length) statusPage = 0;
   const pages = Math.ceil(tasks.length / statusPageSize);
@@ -1477,7 +1501,7 @@ function renderStatusCards() {
     }).join('')}</div>`
     + (pages > 1 ? `<div class="row" style="margin-top:10px;justify-content:center;gap:12px;align-items:center">
         <button class="btn" ${statusPage === 0 ? 'disabled' : ''} onclick="statusPage>0&&(statusPage--,renderStatusCards())">← 上一页</button>
-        <span class="hint">第 ${statusPage * statusPageSize + 1}-${Math.min((statusPage + 1) * statusPageSize, tasks.length)} / ${tasks.length} 个任务</span>
+        <span class="hint">第 ${statusPage * statusPageSize + 1}-${Math.min((statusPage + 1) * statusPageSize, tasks.length)} / ${tasks.length} 个任务${latestOnlyMode && statusTasksCache.length > tasks.length ? `（已隐藏 ${statusTasksCache.length - tasks.length} 个旧版本）` : ''}</span>
         <button class="btn" ${statusPage >= pages - 1 ? 'disabled' : ''} onclick="statusPage<${pages - 1}&&(statusPage++,renderStatusCards())">下一页 →</button>
       </div>` : '');
 }
@@ -2846,6 +2870,7 @@ $('btnRewrite').addEventListener('click', rewriteScript);
 $('btnConfirmScript').addEventListener('click', confirmScript);
 $('btnBuildPrompts').addEventListener('click', buildPrompts);
 $('btnSubmit').addEventListener('click', submit);
+$('latestOnly').checked = latestOnlyMode;
 $('btnRefreshStatus').addEventListener('click', refreshStatus);
 $('btnApplyMp').addEventListener('click', applyMpAll);
 $('btnAssemble').addEventListener('click', assemble);
